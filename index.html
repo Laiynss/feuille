@@ -956,8 +956,10 @@ function base() {
   return baseP;
 }
 async function requete(mode, fn) {
-  const db = await base();
-  if (!db) return null;
+  let db = await base();
+  // une ouverture ratée (base encore tenue au démarrage) ne doit pas faire croire qu'il n'y a rien : on réessaie
+  for (let k = 0; !db && k < 8; k++) { baseP = null; await new Promise(r => setTimeout(r, 300)); db = await base(); }
+  if (!db) throw new Error("base indisponible");
   return new Promise((res, rej) => {
     let r;
     try {
@@ -1240,7 +1242,10 @@ if (!Array.isArray(reglages.carnets)) reglages.carnets = [];
 if (!reglages.carnet) reglages.carnet = "tout";
 
 async function remplirPile(entree = false) {
-  const tous = (await tousLesDessins()) || [];
+  let tous = await tousLesDessins();
+  for (let k = 0; tous === null && k < 5; k++) { await new Promise(r => setTimeout(r, 500)); tous = await tousLesDessins(); }
+  if (tous === null && dessins.length) return disposerPile(entree);   // on garde ce qu'on avait plutôt que d'afficher une pile vide
+  tous = tous || [];
   tous.sort((a, b) => b.modifie - a.modifie);
   dessins = tous.map(r => ({ id: r.id, w: r.w, h: r.h, cree: r.cree, modifie: r.modifie, apercu: r.apercu, nom: r.nom || "", carnet: r.carnet || "", temps: r.temps || 0 }));
   for (const d of dessins) if (d.carnet && !reglages.carnets.includes(d.carnet)) reglages.carnets.push(d.carnet);
