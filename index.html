@@ -1,0 +1,1452 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Feuille</title>
+<style>
+/* La feuille, sa marge où les outils sont posés, et la pile de dessins. Tout ce qu'on voit est tracé avec les outils de l'app. */
+:root{
+  --papier:#f4f3ef;
+  --fond:#6d6e72;
+  color-scheme:light;
+}
+html,body{height:100%;margin:0;background:var(--fond);overflow:hidden;overscroll-behavior:none}
+body{position:relative;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+canvas{display:block}
+#dessin{position:fixed;inset:0;background:var(--papier)}
+#dessin canvas{position:absolute;top:0;touch-action:none;background:var(--papier)}
+#feuille{left:0;width:100%;height:100%}
+#marge{right:0;width:84px;height:100%}
+#pile{position:fixed;inset:0;background:var(--fond)}
+#fond{position:absolute;inset:0;width:100%;height:100%}
+#ciel,#ciel2,#affiche{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transition:opacity 1.2s ease}
+#ciel,#ciel2{opacity:0}
+#ciel.pret,#ciel2.pret{opacity:1}
+#affiche.cache-doux,#ciel.cache-doux{opacity:0}
+#cartes{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;touch-action:pan-y;-webkit-overflow-scrolling:touch}
+#cartes .contenu{position:relative}
+.carte{position:absolute;transition:transform .22s cubic-bezier(.2,.7,.3,1)}
+.carte .ombre{position:absolute;left:-9%;top:-7%;width:124%;height:126%;pointer-events:none;transition:transform .22s cubic-bezier(.2,.7,.3,1),opacity .22s}
+.carte .vue{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.carte .marques{position:absolute;right:4px;bottom:4px;pointer-events:none}
+.envol{position:fixed;left:0;top:0;transform-origin:0 0;pointer-events:none;z-index:5;transition:transform .32s cubic-bezier(.3,.6,.2,1)}
+.cache{display:none !important}
+.carte.arrive{animation:arrive .55s cubic-bezier(.2,.75,.3,1) both;animation-delay:var(--d)}
+@keyframes arrive{from{opacity:0;transform:translate(var(--x),-46px) rotate(calc(var(--a) + 7deg)) scale(1.07)}to{opacity:1;transform:rotate(var(--a))}}
+#reglages{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5vh;background:rgba(6,5,10,0);transition:background .35s}
+#reglages.ouvert{background:rgba(6,5,10,.55)}
+#reglages .rang{display:flex;gap:2.2vw;align-items:flex-end;flex-wrap:wrap;justify-content:center;padding:0 16px}
+#reglages .choix{position:relative;background:var(--papier);padding:7px 7px 7px;box-shadow:0 10px 26px rgba(0,0,0,.45);transition:transform .25s cubic-bezier(.2,.7,.3,1),box-shadow .25s,opacity .35s;opacity:0;transform:translateY(30px) rotate(var(--a))}
+#reglages.ouvert .choix{opacity:1;transform:translateY(0) rotate(var(--a))}
+#reglages.ouvert .choix.pris{transform:translateY(-14px) rotate(0deg) scale(1.08);box-shadow:0 22px 40px rgba(0,0,0,.6)}
+#reglages .choix canvas,#reglages .choix img{display:block;object-fit:cover}
+</style>
+
+<div id="dessin" class="cache">
+  <canvas id="feuille" aria-label="Feuille de dessin"></canvas>
+  <canvas id="marge" aria-label="Outils"></canvas>
+</div>
+<div id="pile">
+  <canvas id="fond" aria-hidden="true"></canvas>
+  <img id="affiche" alt="" aria-hidden="true">
+  <video id="ciel" muted playsinline preload="auto" aria-hidden="true"></video>
+  <video id="ciel2" muted playsinline loop preload="auto" aria-hidden="true"></video>
+  <div id="cartes"><div class="contenu"></div></div>
+</div>
+
+<script>
+// Fonds de la pile : des plans tirés des œuvres (Edgerunners, Tokyo Ghoul, Shanghai…), montés en boucle.
+// Chaque fond est dans fonds/rendu/<nom>/ : affiche.jpg, carte.jpg, info.json et la vidéo VP9 en morceaux m0.webm, m1.webm…
+// La vidéo démarre dès les premiers morceaux reçus (MediaSource) ; une fois tout reçu, un second lecteur prend le
+// fichier entier en boucle et prend la relève à la fin du premier passage, sans coupure.
+(() => {
+  const FONDS = [
+    { n: "lune", titre: "Edgerunners" },
+    { n: "ghoul", titre: "Tokyo Ghoul" },
+    { n: "herding", titre: "Tales of Herding Gods" },
+    { n: "shanghai", titre: "Shanghai" },
+    { n: "sekiro", titre: "Sekiro" },
+    { n: "graphite", titre: "Graphite" },
+  ];
+  const TYPE = 'video/webm; codecs="vp9"';
+  const FLUX = !!(window.MediaSource && MediaSource.isTypeSupported(TYPE));
+  const dl = {};                // nom -> { morceaux: [promesse ArrayBuffer], entier: promesse d'URL }
+  function telecharger(n) {
+    if (!dl[n]) dl[n] = (async () => {
+      const r = await fetch(`fonds/rendu/${n}/info.json`); if (!r.ok) throw new Error(r.status);
+      const info = await r.json();
+      const morceaux = Array.from({ length: info.morceaux }, (_, k) =>
+        fetch(`fonds/rendu/${n}/m${k}.webm`).then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); }));
+      const entier = Promise.all(morceaux).then(b => URL.createObjectURL(new Blob(b, { type: "video/webm" })));
+      entier.catch(() => {});
+      return { morceaux, entier };
+    })().catch(e => { delete dl[n]; throw e; });
+    return dl[n];
+  }
+  function vider(v) {
+    v.onended = v.oncanplay = null; v.pause();
+    if (v.dataset.flux) { URL.revokeObjectURL(v.dataset.flux); delete v.dataset.flux; }
+    v.removeAttribute("src"); v.load();
+    v.style.transition = ""; v.classList.remove("pret");
+  }
+  function creer(A, B, affiche) {
+    let actuel = null, actif = false, gen = 0, visible = null;
+    for (const v of [A, B]) { v.muted = true; v.defaultMuted = true; }
+    const montrer = (v, doux) => {
+      v.style.transition = doux ? "" : "none";
+      v.classList.add("pret"); visible = v;
+      if (actif) v.play().catch(() => {});
+    };
+    async function lancer(n, g) {
+      const d = await telecharger(n);
+      if (g !== gen) return;
+      if (!FLUX) {                                   // sans MediaSource : on attend le fichier entier
+        const url = await d.entier; if (g !== gen) return;
+        A.loop = true; A.src = url;
+        A.oncanplay = () => { A.oncanplay = null; if (g === gen) montrer(A, true); };
+        return;
+      }
+      const ms = new MediaSource(), u = URL.createObjectURL(ms);
+      A.loop = false; A.dataset.flux = u; A.src = u;
+      A.oncanplay = () => { A.oncanplay = null; if (g === gen) montrer(A, true); };
+      ms.addEventListener("sourceopen", async () => {
+        try {
+          const sb = ms.addSourceBuffer(TYPE);
+          for (const p of d.morceaux) {
+            const buf = await p; if (g !== gen) return;
+            await new Promise((ok, ko) => { sb.addEventListener("updateend", ok, { once: true }); sb.addEventListener("error", ko, { once: true }); sb.appendBuffer(buf); });
+          }
+          if (g === gen && ms.readyState === "open") ms.endOfStream();
+        } catch (e) { window.__erreurFond = String(e); }
+      }, { once: true });
+      // relève : le second lecteur prend le fichier entier, en boucle, prêt sur sa première image
+      const url = await d.entier; if (g !== gen) return;
+      B.loop = true; B.preload = "auto"; B.src = url;
+      await new Promise(ok => { if (B.readyState >= 3) ok(); else B.addEventListener("canplaythrough", ok, { once: true }); });
+      if (g !== gen) return;
+      const relais = () => {
+        if (g !== gen) return;
+        B.currentTime = 0; montrer(B, false);
+        requestAnimationFrame(() => requestAnimationFrame(() => { if (g === gen) vider(A); }));
+      };
+      if (A.ended) relais(); else A.onended = relais;
+    }
+    function choisir(n) {
+      if (n === actuel) return;
+      actuel = n; const g = ++gen;
+      vider(A); vider(B); visible = null;
+      if (n === "graphite") { affiche.style.display = "none"; A.style.display = B.style.display = "none"; return; }
+      affiche.style.display = ""; A.style.display = B.style.display = "";
+      affiche.src = `fonds/rendu/${n}/affiche.jpg`;
+      lancer(n, g).catch(e => { window.__erreurFond = String(e); });
+    }
+    return {
+      choisir,
+      demarrer() { actif = true; if (visible) visible.play().catch(() => {}); },
+      arreter() { actif = false; A.pause(); B.pause(); },
+      redimensionner() {},
+      carte: n => `fonds/rendu/${n}/carte.jpg`,
+    };
+  }
+  window.__ambiance = { creer, NOMS: FONDS.map(f => f.n), FONDS };
+})();
+</script>
+<script>
+(() => {
+"use strict";
+const DPR = Math.min(window.devicePixelRatio || 1, 3);
+const MM = 4.8 * DPR;          // pixels écran par millimètre sur la tablette
+const MARGE = 84;              // largeur de la marge, en px CSS
+
+// ---------- grain du papier ----------
+const GR = new Float32Array(512 * 512);
+(function grain() {
+  const T = 512;
+  let graine = 12345;
+  const alea = () => ((graine = (graine * 1664525 + 1013904223) >>> 0) / 4294967296);
+  function couche(cx, cy) {
+    const L = new Float32Array(cx * cy);
+    for (let i = 0; i < L.length; i++) L[i] = alea();
+    const out = new Float32Array(T * T);
+    for (let y = 0; y < T; y++) {
+      const fy = y * cy / T, y0 = fy | 0, ty = fy - y0, sy = ty * ty * (3 - 2 * ty), y1 = (y0 + 1) % cy;
+      for (let x = 0; x < T; x++) {
+        const fx = x * cx / T, x0 = fx | 0, tx = fx - x0, sx = tx * tx * (3 - 2 * tx), x1 = (x0 + 1) % cx;
+        const a = L[y0 * cx + x0], b = L[y0 * cx + x1], c = L[y1 * cx + x0], d = L[y1 * cx + x1];
+        const h0 = a + (b - a) * sx, h1 = c + (d - c) * sx;
+        out[y * T + x] = h0 + (h1 - h0) * sy;
+      }
+    }
+    return out;
+  }
+  // le grain d'un papier à dessin : des creux de 0,2 à 0,6 mm, doux, rien au pixel près
+  const k = Math.max(1, MM / 9.6);
+  const n = c => Math.max(8, Math.round(c / k / 8) * 8);
+  const parts = [
+    [couche(n(232), n(232)), 0.46], [couche(n(136), n(136)), 0.26], [couche(n(56), n(56)), 0.10],
+    [couche(24, 24), 0.08], [couche(24, n(160)), 0.05], [couche(n(160), 24), 0.05],
+  ];
+  for (let i = 0; i < GR.length; i++) { let s = 0; for (const [c, w] of parts) s += c[i] * w; GR[i] = s; }
+  const tri = Array.from({ length: GR.length }, (_, i) => i).sort((a, b) => GR[a] - GR[b]);
+  for (let r = 0; r < tri.length; r++) GR[tri[r]] = r / (tri.length - 1);
+})();
+const grainEn = (x, y) => GR[((y & 511) << 9) | (x & 511)];
+
+// ---------- couleurs ----------
+const PAPIER = [244, 243, 239], MINE = [50, 52, 58], ENCRE = [19, 19, 23];
+const GMAX = 3, LUT_N = 2048, LUT_K = LUT_N / GMAX, LUT = new Float32Array(LUT_N + 1);
+for (let i = 0; i <= LUT_N; i++) LUT[i] = 0.86 * (1 - Math.exp(-(i / LUT_K) * 0.95));
+
+// ---------- une feuille (graphite + encre + affichage) ----------
+function creerFeuille(cv, taille) {
+  return {
+    cv, ctx: cv.getContext("2d", { desynchronized: true, alpha: false }),
+    S: taille, G: new Float32Array(taille * taille), I: new Float32Array(taille * taille),
+    cw: 0, ch: 0, img: null, d32: null, ox: 0, limX: 1e9,
+    sx0: Infinity, sy0: Infinity, sx1: -1, sy1: -1, enreg: null,
+  };
+}
+function assurer(F, n) {
+  if (n <= F.S) return;
+  const N = n + 64, G2 = new Float32Array(N * N), I2 = new Float32Array(N * N);
+  for (let y = 0; y < F.S; y++) {
+    G2.set(F.G.subarray(y * F.S, y * F.S + F.S), y * N);
+    I2.set(F.I.subarray(y * F.S, y * F.S + F.S), y * N);
+  }
+  F.S = N; F.G = G2; F.I = I2;
+}
+function sale(F, x0, y0, x1, y1) {
+  if (x0 < F.sx0) F.sx0 = x0; if (y0 < F.sy0) F.sy0 = y0;
+  if (x1 > F.sx1) F.sx1 = x1; if (y1 > F.sy1) F.sy1 = y1;
+}
+function boite(F, cx, cy, r) {
+  return [Math.max(0, Math.floor(cx - r - 1)), Math.max(0, Math.floor(cy - r - 1)),
+          Math.min(F.S - 1, F.limX - 1, Math.ceil(cx + r + 1)), Math.min(F.S - 1, Math.ceil(cy + r + 1))];
+}
+function composer(F, x0, y0, x1, y1) {
+  x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+  x1 = Math.min(F.cw - 1, x1, F.S - 1); y1 = Math.min(F.ch - 1, y1, F.S - 1);
+  if (x1 < x0 || y1 < y0) return;
+  const { G, I, S, d32, cw, ox } = F;
+  for (let y = y0; y <= y1; y++) {
+    const row = y * S, out = y * cw;
+    for (let x = x0; x <= x1; x++) {
+      const i = row + x;
+      const pa = 1 - 0.028 * (1 - grainEn(x + ox, y));
+      let r = PAPIER[0] * pa, g = PAPIER[1] * pa, b = PAPIER[2] * pa;
+      const gm = G[i];
+      if (gm > 0.0005) {
+        let k = (gm * LUT_K) | 0; if (k > LUT_N) k = LUT_N;
+        const dg = LUT[k];
+        r += (MINE[0] - r) * dg; g += (MINE[1] - g) * dg; b += (MINE[2] - b) * dg;
+      }
+      const e = I[i];
+      if (e > 0) { r += (ENCRE[0] - r) * e; g += (ENCRE[1] - g) * e; b += (ENCRE[2] - b) * e; }
+      d32[out + x] = 0xff000000 | ((b | 0) << 16) | ((g | 0) << 8) | (r | 0);
+    }
+  }
+  F.ctx.putImageData(F.img, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+}
+function montrer(F) {
+  if (F.sx1 < 0) return;
+  composer(F, F.sx0, F.sy0, F.sx1, F.sy1);
+  F.sx0 = F.sy0 = Infinity; F.sx1 = F.sy1 = -1;
+}
+function dimensionner(F, w, h) {
+  assurer(F, Math.max(w, h));
+  F.cw = w; F.ch = h;
+  F.cv.width = w; F.cv.height = h;
+  F.img = F.ctx.createImageData(w, h);
+  F.d32 = new Uint32Array(F.img.data.buffer);
+}
+
+// ---------- retour en arrière : on garde les morceaux de feuille avant chaque trait ----------
+const TU = 64;
+function sauver(F, x0, y0, x1, y1) {
+  const E = F.enreg;
+  if (!E) return;
+  const S = F.S;
+  for (let ty = (y0 / TU) | 0; ty <= ((y1 / TU) | 0); ty++) {
+    for (let tx = (x0 / TU) | 0; tx <= ((x1 / TU) | 0); tx++) {
+      const k = ty * 65536 + tx;
+      if (E.has(k)) continue;
+      const bx = tx * TU, by = ty * TU, w = Math.min(TU, S - bx), h = Math.min(TU, S - by);
+      if (w <= 0 || h <= 0) continue;
+      const g = new Float32Array(w * h), i = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) {
+        const o = (by + y) * S + bx;
+        g.set(F.G.subarray(o, o + w), y * w);
+        i.set(F.I.subarray(o, o + w), y * w);
+      }
+      E.set(k, { bx, by, w, h, g, i });
+    }
+  }
+}
+
+// ---------- les outils ----------
+const OUTILS = {
+  crayon:    { sorte: "mine", R: 3.2,  Rp: 0.25, bord: 0.45, d0: 0.16, dp: 0.74, flux: 1.3, ec: 0.12, pexp: 1.6 },
+  criterium: { sorte: "mine", R: 0.27, Rp: 0.20, bord: 0,    d0: 0.42, dp: 0.45, flux: 0.95, ec: 0.25, pexp: 1.2 },
+  feutre:    { sorte: "encre", R: 0.30, ec: 0.2 }, // pointe fine qui s'écrase quand on appuie
+  mouchoir:  { sorte: "mouchoir", R: 7.0, Rp: 0.15, ec: 0.16, prend: 0.12, rend: 0.07, garde: 0.004, lisse: 0.35 },
+  // la mie : sa largeur vient de l'appui (rayon R0 + R1·p^1.5 en mm)
+  mie:       { sorte: "mie", R0: 0.45, R1: 5.6, ec: 0.14, leve: 0.86 },
+  gomme:     { sorte: "gomme", R: 2.5, Rp: 0, ec: 0.15 },
+};
+const TAILLES_GOMME = [2, 5, 10, 20]; // diamètre en mm
+let tailleGomme = 1;
+const rayon = (t, p) => t.sorte === "gomme" ? Math.max(0.8, TAILLES_GOMME[tailleGomme] / 2 * MM)
+  : t.sorte === "encre" ? Math.max(0.8, MM * t.R * (0.55 + 1.1 * p * p))
+  : t.sorte === "mie" ? Math.max(0.8, MM * (t.R0 + t.R1 * Math.pow(p, 1.5)))
+  : Math.max(0.8, t.R * MM * (1 - t.Rp / 2 + t.Rp * p));
+
+// le mouchoir : un carré de tissu qui porte son graphite, collé sous le doigt
+const TR = Math.ceil(1.12 * OUTILS.mouchoir.R * MM) + 2, TS = 2 * TR + 1;
+let tissu = new Float32Array(TS * TS); // reste sale d'un trait à l'autre
+const espacement = (t, r) => Math.max(0.5, t.ec * 2 * r);
+
+function touchMine(F, t, cx, cy, r, p, pas) {
+  const [x0, y0, x1, y1] = boite(F, cx, cy, r);
+  if (x1 < x0) return;
+  sauver(F, x0, y0, x1, y1);
+  const doux = t.bord > 0 ? t.bord * r : 0.8;
+  const debit = t.flux * (pas / (2 * r)) * (0.15 + 2.2 * Math.pow(p, t.pexp));
+  const prof = t.d0 + t.dp * p;
+  const { G, S, ox } = F;
+  // le plat d'une mine couchée n'est pas lisse : ses arêtes laissent des stries dans le sens du trait
+  const strie = t.bord > 0, icx = Math.round(cx), icy = Math.round(cy);
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy, row = y * S;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      let m = (r - Math.sqrt(dx * dx + dy * dy)) / doux;
+      if (m <= 0) continue;
+      if (m > 1) m = 1;
+      const i = row + x, g = G[i];
+      const pr = prof + 0.28 * (g < 2 ? g : 2) / 2;
+      // contact doux : la mine touche les bosses, puis descend dans les creux quand on appuie
+      let c = (grainEn(x + ox, y) - (1 - pr)) / 0.7 + 0.25;
+      c = c < 0 ? 0 : c > 1 ? 1 : c;
+      c = 0.3 + 0.7 * c * c * (3 - 2 * c);
+      const lt = strie ? GR[((((y - icy) >> 1) + 300 & 511) << 9) | (((x - icx) >> 1) + 300 & 511)] : 0;
+      const mine = strie ? 0.25 + 2.25 * lt * lt : 1;
+      G[i] = g + debit * m * c * mine * (1 - g / GMAX);
+    }
+  }
+  sale(F, x0, y0, x1, y1);
+}
+function touchEncre(F, cx, cy, r, sec) {
+  const [x0, y0, x1, y1] = boite(F, cx, cy, r + 1);
+  if (x1 < x0) return;
+  sauver(F, x0, y0, x1, y1);
+  const { I, S, ox } = F;
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy, row = y * S;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      const h = grainEn(x + ox, y);
+      let m = (r - Math.sqrt(dx * dx + dy * dy)) / 0.7 + 0.5 + (h - 0.5) * 0.55;
+      if (m <= 0) continue;
+      if (m > 1) m = 1;
+      if (sec > 0) m *= 1 - sec * (1 - h);
+      const i = row + x;
+      if (m > I[i]) I[i] = m;
+    }
+  }
+  sale(F, x0, y0, x1, y1);
+}
+function touchMie(F, t, cx, cy, r, p, pas) {
+  const [x0, y0, x1, y1] = boite(F, cx, cy, r);
+  if (x1 < x0) return;
+  sauver(F, x0, y0, x1, y1);
+  // ce qu'un passage enlève au centre, réparti sur les touches qui se recouvrent
+  const T = t.leve * (0.7 + 0.3 * p);
+  const n = 1.3 * pas / (2 * r);
+  const doux = 0.4 * r + 1;
+  const { G, S, ox } = F;
+  // le plat d'une mine couchée n'est pas lisse : ses arêtes laissent des stries dans le sens du trait
+  const strie = t.bord > 0, icx = Math.round(cx), icy = Math.round(cy);
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy, row = y * S;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      let m = (r - Math.sqrt(dx * dx + dy * dy)) / doux;
+      if (m <= 0) continue;
+      if (m > 1) m = 1;
+      const i = row + x;
+      if (G[i] < 0.0005) continue;
+      // la mie prend sur les bosses du papier, le creux garde un voile
+      let l = T * m * (0.8 + 0.4 * grainEn(x + ox, y));
+      if (l > 0.97) l = 0.97;
+      G[i] *= Math.pow(1 - l, n);
+    }
+  }
+  sale(F, x0, y0, x1, y1);
+}
+function touchGomme(F, cx, cy, r) {
+  const [x0, y0, x1, y1] = boite(F, cx, cy, r);
+  if (x1 < x0) return;
+  sauver(F, x0, y0, x1, y1);
+  const { G, I, S } = F;
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy, row = y * S;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx;
+      let m = r + 0.5 - Math.sqrt(dx * dx + dy * dy);
+      if (m <= 0) continue;
+      if (m > 1) m = 1;
+      const i = row + x;
+      G[i] *= 1 - m; I[i] *= 1 - m;
+    }
+  }
+  sale(F, x0, y0, x1, y1);
+}
+function touchMouchoir(F, t, cx, cy, r, p, st) {
+  let [x0, y0, x1, y1] = boite(F, cx, cy, r);
+  x0 = Math.max(1, x0); y0 = Math.max(1, y0); x1 = Math.min(F.S - 2, x1); y1 = Math.min(F.S - 2, y1);
+  if (x1 < x0) return;
+  sauver(F, x0, y0, x1, y1);
+  const T = st && st.tissu ? st.tissu : (tissu);
+  const { G, S, ox } = F;
+  const s0 = 0.35 + 0.65 * p;
+  const icx = Math.round(cx), icy = Math.round(cy);
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - cy, row = y * S, v = y - icy + TR;
+    if (v < 0 || v >= TS) continue;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - cx, q = (dx * dx + dy * dy) / (r * r);
+      if (q >= 1) continue;
+      const u = x - icx + TR;
+      if (u < 0 || u >= TS) continue;
+      const s = s0 * (1 - q);
+      // la trame du tissu (elle se déplace avec le doigt : elle laisse des traînées dans le sens du geste)
+      const fb = GR[(((v * 5) & 511) << 9) | ((u * 5 + 131) & 511)];
+      const gr = grainEn(x + ox, y);
+      const i = row + x, g = G[i], ti = v * TS + u, tv = T[ti];
+      const prend = t.prend * s * (0.4 + 1.2 * fb) * (0.7 + 0.6 * gr) * g;
+      const rend = t.rend * s * (0.4 + 1.2 * fb) * tv;
+      // le frottement pousse le graphite dans les creux du papier
+      const voisins = (G[i - 1] + G[i + 1] + G[i - S] + G[i + S]) * 0.25;
+      G[i] = g - prend + rend + (voisins - g) * t.lisse * s;
+      T[ti] = (tv + prend - rend) * (1 - t.garde * s);
+    }
+  }
+  sale(F, x0, y0, x1, y1);
+}
+// un contact de l'outil ; renvoie l'espacement jusqu'au suivant
+function touche(F, cle, x, y, p, k, ddx, ddy, vitesse, st) {
+  const t = OUTILS[cle];
+  const r = rayon(t, p) * k;
+  const pas = espacement(t, r);
+  if (t.sorte === "mine") touchMine(F, t, x, y, r, p, pas);
+  else if (t.sorte === "encre") touchEncre(F, x, y, r, Math.min(0.25, Math.max(0, (vitesse / MM - 0.8) / 2)));
+  else if (t.sorte === "mie") touchMie(F, t, x, y, r, p, pas);
+  else if (t.sorte === "gomme") touchGomme(F, x, y, r);
+  else touchMouchoir(F, t, x, y, r, p, st);
+  return pas;
+}
+// fait avancer un trait jusqu'au point suivant
+function avancer(F, s, cle, nx, ny, np, k) {
+  const dx = nx - s.x, dy = ny - s.y, dist = Math.hypot(dx, dy);
+  if (dist < 0.01) { s.p = np; return; }
+  const ux = dx / dist, uy = dy / dist;
+  const t = OUTILS[cle];
+  let suivant = s.reste, garde = 0;
+  while (suivant <= dist && garde++ < 4000) {
+    const f = suivant / dist, p = s.p + (np - s.p) * f;
+    const pas = espacement(t, rayon(t, p) * k);
+    touche(F, cle, s.x + dx * f, s.y + dy * f, p, k, ux * pas, uy * pas, s.v, s);
+    suivant += pas;
+  }
+  s.reste = suivant - dist;
+  s.x = nx; s.y = ny; s.p = np;
+}
+// trait tracé par l'appli elle-même (pour la marge), points en px CSS
+function tracer(F, cle, pts, k = 1) {
+  const [x, y, p] = pts[0];
+  const e = F.echelle || DPR;
+  const s = { x: x * e, y: y * e, p, v: 0, reste: 0, tissu: new Float32Array(TS * TS) };
+  if (OUTILS[cle].sorte !== "mouchoir") s.reste = touche(F, cle, s.x, s.y, p, k, 0, 0, 0);
+  for (let i = 1; i < pts.length; i++) avancer(F, s, cle, pts[i][0] * e, pts[i][1] * e, pts[i][2], k);
+}
+
+
+// ======================================================================
+// dessiner des objets avec les outils de l'app (marge, pile)
+// ======================================================================
+// T : repère d'un objet (centre, angle) ; x le long de l'objet, y en travers ; tout en px CSS
+function repere(cx, cy, a, ech = 1) {
+  const c = Math.cos(a) * ech, s = Math.sin(a) * ech;
+  return (x, y, p = 0.5) => [cx + x * c - y * s, cy + x * s + y * c, p];
+}
+let tremble = 1;
+const main = () => ((tremble = (tremble * 16807) % 2147483647) / 2147483647 - 0.5);
+// un trait à la main : on découpe en petits pas et on laisse trembler un peu
+function tr(F, cle, T, pts, k = 1, mou = 0.18) {
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const [x, y, p] = pts[i];
+    if (i > 0) {
+      const [x0, y0, p0] = pts[i - 1];
+      const n = Math.max(1, Math.ceil(Math.hypot(x - x0, y - y0) / 1.5));
+      for (let j = 1; j < n; j++) { const t = j / n; out.push(T(x0 + (x - x0) * t + main() * mou, y0 + (y - y0) * t + main() * mou, p0 + (p - p0) * t)); }
+    }
+    out.push(T(x + main() * mou, y + main() * mou, p));
+  }
+  tracer(F, cle, out, k);
+}
+// courbe passant par des points (Catmull-Rom)
+function lisse(pts, ferme = false, n = 8) {
+  const out = [], m = pts.length;
+  const P = i => ferme ? pts[(i + m) % m] : pts[Math.max(0, Math.min(m - 1, i))];
+  const fin = ferme ? m : m - 1;
+  for (let i = 0; i < fin; i++) {
+    const a = P(i - 1), b = P(i), c = P(i + 1), d = P(i + 2);
+    for (let j = 0; j < n; j++) {
+      const t = j / n, t2 = t * t, t3 = t2 * t;
+      const f = (u, v, w, z) => 0.5 * (2 * v + (-u + w) * t + (2 * u - 5 * v + 4 * w - z) * t2 + (-u + 3 * v - 3 * w + z) * t3);
+      out.push([f(a[0], b[0], c[0], d[0]), f(a[1], b[1], c[1], d[1]), b[2] + (c[2] - b[2]) * t]);
+    }
+  }
+  out.push(ferme ? [...pts[0]] : [...pts[m - 1]]);
+  return out;
+}
+// remplir une bande au crayon couché (va-et-vient en travers, en avançant le long)
+function hachure(F, T, x0, x1, haut, bas, p, k, pas = 1.2) {
+  const pts = [];
+  let sens = 0;
+  for (let x = x0; x <= x1 + 0.01; x += pas) { pts.push([x, sens ? bas(x) : haut(x), p]); sens ^= 1; }
+  tr(F, "crayon", T, pts, k, 0.1);
+}
+function estompe(F, T, pts, k) { tr(F, "mouchoir", T, pts, k, 0.3); }
+function gommerT(F, T, pts, r) {
+  const e = F.echelle || DPR;
+  for (let i = 1; i < pts.length; i++) {
+    const [ax, ay] = T(pts[i - 1][0], pts[i - 1][1]), [bx, by] = T(pts[i][0], pts[i][1]);
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 0.5));
+    for (let j = 0; j <= n; j++) touchGomme(F, (ax + (bx - ax) * j / n) * e, (ay + (by - ay) * j / n) * e, r * e);
+  }
+}
+// ombre d'un objet posé ou soulevé : du graphite estompé sous sa silhouette
+function ombre(F, T, x0, x1, hw, force, flou) {
+  hachure(F, T, x0, x1, () => -hw * 0.7, () => hw * 0.7, force, 0.1, 0.9);
+  const k = Math.max(flou, hw * 1.5 / 33.6);
+  for (let j = 0; j < 3; j++) {
+    const pts = [];
+    for (let x = x0 - 3, s = 0; x <= x1 + 3; x += 2.2, s++) pts.push([x, Math.sin(s * 1.3 + j) * hw * 0.6, 0.7]);
+    estompe(F, T, j % 2 ? pts.reverse() : pts, k);
+  }
+}
+
+const OBJETS = {
+  crayon(F, T) {
+    const L0 = -31, Lb = 10, Lc = 23, Lt = 29.5, hw = 4.3;
+    hachure(F, T, L0 + 1, Lb, () => -hw + 1.2, () => hw - 0.8, 0.32, 0.11);
+    hachure(F, T, L0 + 1, Lb, () => 0.6, () => hw - 0.9, 0.6, 0.1);
+    const cone = x => hw - (hw - 1.3) * (x - Lb) / (Lc - Lb);
+    hachure(F, T, Lb + 1.5, Lc, x => -cone(x) + 0.7, x => cone(x) - 0.7, 0.18, 0.08, 1.4);
+    for (let j = 0; j < 3; j++) hachure(F, T, Lc, Lt - 1.2, x => -1.3 * (Lt - x) / (Lt - Lc), x => 1.3 * (Lt - x) / (Lt - Lc), 0.95, 0.06, 0.6);
+    tr(F, "feutre", T, [[L0, -hw, 0.12], [Lb, -hw, 0.16]], 0.62);
+    tr(F, "feutre", T, [[L0, hw, 0.16], [Lb, hw, 0.12]], 0.62);
+    tr(F, "feutre", T, [[L0, -hw, 0.1], [L0 - 0.4, 0, 0.14], [L0, hw, 0.1]], 0.62);
+    tr(F, "criterium", T, [[L0 + 1, -1.4, 0.35], [Lb - 0.5, -1.3, 0.35]], 0.75);
+    tr(F, "criterium", T, [[L0 + 1, 1.6, 0.3], [Lb - 0.5, 1.5, 0.3]], 0.65);
+    // le bois taillé : bord festonné, puis le cône
+    const fest = [];
+    for (let t = 0; t <= 1.0001; t += 0.08) fest.push([Lb + 1.8 * Math.abs(Math.sin(t * Math.PI * 1.5)), -hw + 2 * hw * t, 0.12]);
+    tr(F, "feutre", T, fest, 0.55, 0.05);
+    tr(F, "feutre", T, [[Lb, -hw, 0.14], [Lc, -1.3, 0.1], [Lt, 0, 0.14]], 0.6);
+    tr(F, "feutre", T, [[Lb, hw, 0.14], [Lc, 1.3, 0.1], [Lt, 0, 0.12]], 0.6);
+    tr(F, "criterium", T, [[Lb + 3, -1.2, 0.3], [Lc - 0.5, -0.5, 0.3]], 0.6);
+    tr(F, "criterium", T, [[Lb + 3.5, 1.6, 0.3], [Lc - 0.5, 0.6, 0.3]], 0.6);
+  },
+  criterium(F, T) {
+    const L0 = -29, g0 = 0, g1 = 13, c1 = 21, s1 = 24.5, mine = 28.5, hw = 2.7;
+    hachure(F, T, L0 + 1, g0, () => -hw + 0.8, () => hw - 0.6, 0.22, 0.07, 1);
+    hachure(F, T, L0 + 1, g0, () => 0.5, () => hw - 0.6, 0.45, 0.06, 1);
+    hachure(F, T, g0, g1, () => -hw + 0.6, () => hw - 0.5, 0.55, 0.07, 0.9);
+    for (let x = g0 + 0.8; x < g1; x += 1.5) tr(F, "criterium", T, [[x, -hw + 0.3, 0.5], [x + 0.4, hw - 0.3, 0.5]], 0.55, 0.05);
+    const cone = x => hw - (hw - 0.8) * (x - g1) / (c1 - g1);
+    hachure(F, T, g1, c1, x => -cone(x) + 0.4, x => cone(x) - 0.3, 0.7, 0.06, 0.8);
+    tr(F, "mie", T, [[g1 + 1, -0.9, 0.25], [c1 - 1, -0.5, 0.25]], 0.3);
+    tr(F, "feutre", T, [[L0, -hw, 0.1], [g1, -hw, 0.12], [c1, -0.8, 0.1], [s1, -0.55, 0.1], [s1, 0.55, 0.1], [c1, 0.8, 0.1], [g1, hw, 0.12], [L0, hw, 0.1], [L0, -hw, 0.1]], 0.55, 0.06);
+    tr(F, "feutre", T, [[g0, -hw, 0.08], [g0, hw, 0.08]], 0.5, 0.05);
+    tr(F, "criterium", T, [[s1, 0, 0.75], [mine, 0, 0.6]], 0.7, 0.03);
+    // pince et poussoir
+    tr(F, "feutre", T, [[-26, -hw, 0.1], [-26.5, -hw - 1.6, 0.12], [-11, -hw - 1.5, 0.12], [-10, -hw - 0.6, 0.1]], 0.5, 0.06);
+    tr(F, "feutre", T, [[L0, -1.8, 0.1], [L0 - 4, -1.8, 0.12], [L0 - 4, 1.8, 0.12], [L0, 1.8, 0.1]], 0.5, 0.06);
+    hachure(F, T, L0 - 3.6, L0, () => -1.3, () => 1.3, 0.5, 0.05, 0.8);
+  },
+  feutre(F, T) {
+    const c0 = -32, c1 = -18, b1 = 11, k1 = 20, s1 = 24.5, n1 = 27.5, hw = 3.4;
+    // capuchon noir posté au bout
+    for (let j = 0; j < 2; j++) {
+      const pts = [];
+      let s = 0;
+      for (let x = c0 + 0.6; x <= c1 - 0.3; x += 0.55) { pts.push([x, s ? hw + 0.1 : -hw - 0.1, 0.75]); s ^= 1; }
+      tr(F, "feutre", T, pts, 0.9, 0.05);
+    }
+    tr(F, "feutre", T, [[c0, -hw - 0.4, 0.3], [c1, -hw - 0.4, 0.3], [c1, hw + 0.4, 0.3], [c0, hw + 0.4, 0.3], [c0, -hw - 0.4, 0.3]], 0.6, 0.04);
+    gommerT(F, T, [[c0 + 2, -1.6], [c1 - 2, -1.6]], 0.55);
+    tr(F, "feutre", T, [[c0 + 1.5, -hw - 1.3, 0.3], [c1 - 1, -hw - 1.3, 0.3]], 0.55, 0.05);
+    // le corps
+    hachure(F, T, c1 + 0.5, b1, () => 0.3, () => hw - 0.6, 0.3, 0.09);
+    tr(F, "feutre", T, [[c1, -hw, 0.12], [b1, -hw, 0.12]], 0.6);
+    tr(F, "feutre", T, [[c1, hw, 0.14], [b1, hw, 0.12]], 0.6);
+    tr(F, "feutre", T, [[b1, -hw, 0.12], [b1, hw, 0.12]], 0.55);
+    const cone = x => hw - (hw - 1.1) * (x - b1) / (k1 - b1);
+    hachure(F, T, b1 + 0.6, k1, x => -cone(x) + 0.6, x => cone(x) - 0.5, 0.45, 0.07, 1);
+    tr(F, "feutre", T, [[b1, -hw, 0.12], [k1, -1.1, 0.1], [k1, 1.1, 0.1], [b1, hw, 0.12]], 0.55);
+    for (let x = b1 + 2; x < k1 - 2; x += 1.6) tr(F, "criterium", T, [[x, -cone(x) + 0.4, 0.4], [x, cone(x) - 0.4, 0.4]], 0.5, 0.05);
+    // manchon de métal et pointe
+    tr(F, "feutre", T, [[k1, -0.8, 0.1], [s1, -0.7, 0.1], [s1, 0.7, 0.1], [k1, 0.8, 0.1]], 0.5, 0.04);
+    hachure(F, T, k1, s1, () => 0.1, () => 0.6, 0.6, 0.04, 0.7);
+    tr(F, "feutre", T, [[s1, 0, 0.45], [n1, 0, 0.3]], 0.75, 0.02);
+  },
+  mouchoir(F, T) {
+    const pts = [];
+    const r = [1.0, 0.82, 1.08, 0.9, 1.15, 0.78, 1.02, 0.94, 1.12, 0.86, 1.0];
+    for (let i = 0; i < r.length; i++) {
+      const a = i / r.length * Math.PI * 2;
+      pts.push([Math.cos(a) * 21 * r[i], Math.sin(a) * 14 * r[i], 0.42]);
+    }
+    const plis = [[[-18, -6], [-8, -2], [-3, 3]], [[6, -13], [5, -5], [9, 1]], [[19, 3], [10, 4], [4, 9]], [[-6, 12], [-4, 6]], [[-20, 4], [-12, 4]]];
+    // le creux des plis : un peu de gris le long, fondu
+    for (const pl of plis) {
+      const c = lisse(pl.map(([x, y]) => [x, y, 0.35]));
+      tr(F, "crayon", T, c.map(([x, y, p]) => [x + 0.8, y + 1.2, p]), 0.08, 0.1);
+    }
+    // il a déjà servi : une tache de graphite ronde
+    {
+      const t = [];
+      for (let i = 0; i < 40; i++) { const a = i * 0.7, rr = 4.5 * (1 - i / 50); t.push([-8 + Math.cos(a) * rr, 2 + Math.sin(a) * rr * 0.8, 0.55]); }
+      tr(F, "crayon", T, t, 0.1, 0.1);
+    }
+    for (let j = 0; j < 2; j++) estompe(F, T, [[-14, 0, 0.7], [-2, 4, 0.7], [-10, 6, 0.6], [2, -2, 0.5], [12, 6, 0.4]], 0.2);
+    tr(F, "criterium", T, lisse(pts, true), 0.85, 0.25);
+    for (const pl of plis) tr(F, "criterium", T, lisse(pl.map(([x, y]) => [x, y, 0.32])), 0.7, 0.2);
+    tr(F, "feutre", T, lisse([[-20, -5, 0.06], [-14, -12, 0.08], [-4, -13, 0.06]]), 0.45, 0.1);
+    tr(F, "feutre", T, lisse([[10, 14, 0.06], [18, 9, 0.08], [22, 2, 0.05]]), 0.45, 0.1);
+  },
+  mie(F, T) {
+    const rx = 14, ry = 10;
+    const forme = [[-14, -2], [-10, -9], [-1, -11], [8, -9], [14, -3], [13, 6], [5, 10], [-6, 10], [-13, 6]];
+    hachure(F, T, -rx + 1, rx - 1, x => -ry * Math.sqrt(Math.max(0, 1 - (x / rx) ** 2)) + 1.2, x => ry * Math.sqrt(Math.max(0, 1 - (x / rx) ** 2)) - 1, 0.6, 0.11, 1.3);
+    hachure(F, T, -rx + 3, rx - 2, () => 2, x => ry * Math.sqrt(Math.max(0, 1 - (x / rx) ** 2)) - 1, 0.65, 0.09, 1.3);
+    for (let j = 0; j < 3; j++) estompe(F, T, [[-10, -4, 0.6], [10, -3, 0.6], [8, 5, 0.6], [-9, 5, 0.6], [-4, -6, 0.5]], 0.14);
+    tr(F, "mie", T, [[-8, -5, 0.22], [-2, -7, 0.26], [3, -6, 0.2]], 0.42);
+    tr(F, "criterium", T, lisse(forme.map(([x, y]) => [x, y, 0.4]), true), 0.75, 0.2);
+    tr(F, "criterium", T, lisse([[-6, 2, 0.35], [-1, 4, 0.35], [5, 2, 0.3]]), 0.6, 0.15);
+    tr(F, "criterium", T, lisse([[2, -4, 0.3], [6, -1, 0.3]]), 0.55, 0.1);
+  },
+  gomme(F, T) {
+    const x0 = -20, xm = 4, x1 = 20, hw = 7;
+    // la gomme dépasse du fourreau, coin usé et un peu sale
+    hachure(F, T, xm, x1 - 2, () => 2.5, () => hw - 1, 0.18, 0.1, 1.5);
+    hachure(F, T, x1 - 5, x1 - 1, () => -hw + 2, () => hw - 1, 0.4, 0.07, 1.2);
+    estompe(F, T, [[x1 - 6, -4, 0.5], [x1 - 1, 4, 0.5]], 0.1);
+    tr(F, "criterium", T, [[xm, -hw + 0.6, 0.45], [x1 - 3.5, -hw + 0.6, 0.45], [x1 - 0.6, -hw + 2.8, 0.45], [x1, hw - 1.5, 0.45], [x1 - 1.2, hw - 0.4, 0.45], [xm, hw - 0.6, 0.45]], 0.85, 0.12);
+    // le fourreau de carton
+    hachure(F, T, x0 + 0.5, xm, () => 1, () => hw - 0.2, 0.3, 0.1, 1.2);
+    tr(F, "feutre", T, [[x0, -hw - 0.5, 0.14], [xm, -hw - 0.5, 0.14], [xm, hw + 0.5, 0.14], [x0, hw + 0.5, 0.14], [x0, -hw - 0.5, 0.14]], 0.6, 0.08);
+    hachure(F, T, -13.5, -9.5, () => -hw, () => hw, 0.95, 0.05, 0.7);
+    tr(F, "feutre", T, [[-14, -hw - 0.5, 0.1], [-14, hw + 0.5, 0.1]], 0.5, 0.05);
+    tr(F, "feutre", T, [[-9, -hw - 0.5, 0.1], [-9, hw + 0.5, 0.1]], 0.5, 0.05);
+  },
+};
+// silhouette pour l'ombre : [x0, x1, demi-largeur]
+const SILHOUETTE = { crayon: [-31, 29, 4.3], criterium: [-33, 28, 2.8], feutre: [-32, 27, 3.6], mouchoir: [-20, 20, 12], mie: [-13, 13, 9], gomme: [-20, 20, 7] };
+// posé dans la marge : angle (pointe vers la feuille, en haut à gauche)
+const POSE = { crayon: -2.55, criterium: -2.62, feutre: -2.5, mouchoir: -0.12, mie: 0.15, gomme: -0.5 };
+
+// ======================================================================
+// une feuille qu'on rend en image transparente (marques, ombres)
+// ======================================================================
+function feuilleLibre(wCss, hCss, ech = DPR) {
+  const S = Math.ceil(Math.max(wCss, hCss) * ech) + 4;
+  return { S, G: new Float32Array(S * S), I: new Float32Array(S * S), cw: 0, ch: 0, ox: 0, limX: 1e9, echelle: ech,
+           sx0: Infinity, sy0: Infinity, sx1: -1, sy1: -1, enreg: null, wCss, hCss };
+}
+function versTransparent(T) {
+  const e = T.echelle, w = Math.round(T.wCss * e), h = Math.round(T.hCss * e);
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  const img = ctx.createImageData(w, h), d = img.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * T.S + x, o = (y * w + x) * 4;
+    const gm = T.G[i];
+    let ag = 0;
+    if (gm > 0.0005) { let k = (gm * LUT_K) | 0; if (k > LUT_N) k = LUT_N; ag = LUT[k]; }
+    const e2 = T.I[i], a = 1 - (1 - ag) * (1 - e2);
+    if (a <= 0.002) continue;
+    for (let c = 0; c < 3; c++) d[o + c] = (MINE[c] * ag * (1 - e2) + ENCRE[c] * e2) / a;
+    d[o + 3] = a * 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  cv.style.width = T.wCss + "px"; cv.style.height = T.hCss + "px";
+  return cv;
+}
+
+// ======================================================================
+// la feuille principale et la marge
+// ======================================================================
+const zone0 = Math.ceil(Math.max(screen.width || 0, screen.height || 0, innerWidth, innerHeight, 256) * DPR) + 4;
+const F = creerFeuille(document.getElementById("feuille"), zone0);
+const M = creerFeuille(document.getElementById("marge"), Math.ceil(Math.max(MARGE, 256) * DPR) + 4);
+const ELT = { dessin: document.getElementById("dessin"), pile: document.getElementById("pile"),
+              cartes: document.getElementById("cartes"), fond: document.getElementById("fond") };
+ELT.contenu = ELT.cartes.firstElementChild;
+let outil = "crayon";
+const histo = [];
+const HISTO_MAX = 80;
+let vue = "pile";
+
+function dimensionnerTout() {
+  const w = Math.max(1, Math.round(innerWidth * DPR)), h = Math.max(1, Math.round(innerHeight * DPR));
+  if (w !== F.cw || h !== F.ch) {
+    dimensionner(F, w, h);
+    const mw = Math.round(MARGE * DPR);
+    F.limX = w - mw;
+    composer(F, 0, 0, w - 1, h - 1);
+    dimensionner(M, mw, h);
+    M.ox = w - mw;
+    M.limX = 1e9;
+    cacheMarge.clear();
+    dessinerMarge();
+  }
+  if (vue === "pile" && taillePile !== innerWidth + "x" + innerHeight) { disposerPile(); AMB.redimensionner(); }
+}
+
+// ---------- la marge : les outils posés à côté de la feuille ----------
+let zones = [];
+const cacheMarge = new Map();
+const ORDRE = ["crayon", "criterium", "feutre", "mouchoir", "mie", "gomme"];
+function dessinerMarge() {
+  const cle = outil + "/" + (outil === "gomme" ? tailleGomme : "");
+  const H = M.ch / DPR;
+  zones = [];
+  const cx = 47, haut = 8, pas = 64;
+  let y0 = haut;
+  const plan = [];
+  for (const o of ORDRE) {
+    plan.push([o, y0 + pas / 2]);
+    zones.push({ y0, y1: y0 + pas, faire: () => choisir(o) });
+    y0 += pas;
+    if (o === "gomme" && outil === "gomme") {
+      TAILLES_GOMME.forEach((_, i) => {
+        const col = i % 2, lig = (i / 2) | 0;
+        const ccx = 30 + col * 34, ccy = y0 + 16 + lig * 32;
+        zones.push({ y0: ccy - 16, y1: ccy + 16, x0: ccx - 17, x1: ccx + 17, faire: () => { tailleGomme = i; dessinerMarge(); } });
+      });
+      y0 += 70;
+    }
+  }
+  const yR = Math.max(y0 + 14, Math.min(H * 0.6, H - 150));
+  zones.push({ y0: yR - 4, y1: yR + 64, faire: annuler });
+  zones.push({ y0: H - 70, y1: H, faire: () => allerPile() });
+
+  const deja = cacheMarge.get(cle);
+  if (deja && deja.length === M.d32.length) { M.d32.set(deja); M.ctx.putImageData(M.img, 0, 0); return; }
+
+  M.G.fill(0); M.I.fill(0);
+  tremble = 7;
+  // le trait de marge, à la main
+  {
+    const pts = [];
+    for (let y = -4; y <= H + 4; y += 12) pts.push([5 + Math.sin(y * 0.013) * 0.8, y, 0.32]);
+    tracer(M, "criterium", pts);
+  }
+  for (const [o, cy] of plan) {
+    const pris = o === outil;
+    const S = SILHOUETTE[o], a = POSE[o] + (pris ? 0.12 : 0);
+    const ox = pris ? cx - 5 : cx, oy = pris ? cy - 3 : cy;
+    // l'outil en main est soulevé : son ombre s'écarte et s'élargit
+    if (pris) ombre(M, repere(ox + 6, oy + 9, a, 1.04), S[0] + 2, S[1] - 2, S[2] * 1.1, 0.6, 0.2);
+    else ombre(M, repere(ox + 1, oy + 1.5, a), S[0] + 4, S[1] - 4, S[2] * 0.6, 0.2, 0.12);
+    OBJETS[o](M, repere(ox, oy, a, pris ? 1.1 : 1));
+  }
+  // tailles de la gomme
+  if (outil === "gomme") {
+    const yg = plan[5][1] + pas / 2;
+    const vues = [4, 7, 10.5, 14];
+    TAILLES_GOMME.forEach((_, i) => {
+      const col = i % 2, lig = (i / 2) | 0;
+      const ccx = 30 + col * 34, ccy = yg + 16 + lig * 32;
+      const choisie = i === tailleGomme;
+      const pts = [];
+      for (let j = 0; j <= 60; j++) { const t = -1.4 + j / 60 * Math.PI * 2 * (choisie ? 1.06 : 1); pts.push([ccx + Math.cos(t) * vues[i], ccy + Math.sin(t) * vues[i], choisie ? 0.6 : 0.4]); }
+      tracer(M, choisie ? "feutre" : "criterium", pts, choisie ? 0.8 : 1);
+    });
+  }
+  // retour en arrière : une boucle à l'encre
+  {
+    const ccx = cx, ccy = yR + 30, R = 16;
+    const pts = [];
+    for (let t = 0; t <= 1.0001; t += 0.04) {
+      const a = -0.35 + t * 4.2;
+      pts.push([ccx + Math.cos(a) * R, ccy - Math.sin(a) * R, 0.5 + 0.3 * Math.sin(t * Math.PI)]);
+    }
+    tracer(M, "feutre", pts, 0.9);
+    const fin = pts[pts.length - 1], ang = -0.35 + 4.2;
+    const tx = -Math.sin(ang), ty = -Math.cos(ang), nx = Math.cos(ang), ny = -Math.sin(ang);
+    tracer(M, "feutre", [[fin[0] - tx * 8 + nx * 5.5, fin[1] - ty * 8 + ny * 5.5, 0.5], [fin[0], fin[1], 0.7]], 0.9);
+    tracer(M, "feutre", [[fin[0] - tx * 8 - nx * 5.5, fin[1] - ty * 8 - ny * 5.5, 0.5], [fin[0], fin[1], 0.7]], 0.9);
+  }
+  // le coin de la feuille, relevé : dessous, la pile
+  {
+    const W = M.cw / DPR, s = 44, X = W, Y = H;
+    const I = repere(0, 0, 0);
+    // ce qu'on voit sous le coin : le gris de la pile
+    for (let j = 0; j < 3; j++) {
+      const pts = [];
+      for (let u = 0; u <= s; u += 1.3) pts.push([X - u + 0.5, Y + 1, 0.95], [X + 1, Y - (s - u) - 0.5 + (j % 2), 0.95]);
+      tr(M, "crayon", I, pts, 0.1, 0.05);
+    }
+    estompe(M, I, [[X - s * 0.6, Y - 3, 0.5], [X - 3, Y - s * 0.6, 0.5]], 0.07);
+    // le rabat : un triangle de papier replié vers l'intérieur, qui fait un peu d'ombre sur la feuille
+    const A = [X - s, Y], B = [X, Y - s], C = [X - s * 0.84, Y - s * 0.84];
+    ombre(M, repere(C[0] + 2, C[1] + 2, -Math.PI / 4), -s * 0.46, s * 0.46, 6, 0.4, 0.12);
+    for (let u = 0; u <= 1.0001; u += 0.03) gommerT(M, I, [[A[0] + (C[0] - A[0]) * u, A[1] + (C[1] - A[1]) * u], [B[0] + (C[0] - B[0]) * u, B[1] + (C[1] - B[1]) * u]], 1.1);
+    // le pli fait un léger gris sur le rabat
+    tr(M, "crayon", I, [[A[0] + 5, A[1] - 3, 0.25], [B[0] - 3, B[1] + 5, 0.25]], 0.1, 0.1);
+    estompe(M, I, [[A[0] + 7, A[1] - 5, 0.4], [B[0] - 5, B[1] + 7, 0.4]], 0.06);
+    tr(M, "feutre", I, [[A[0], A[1], 0.12], [C[0], C[1], 0.16], [B[0], B[1], 0.12]], 0.7, 0.1);
+    tr(M, "criterium", I, [[A[0], A[1], 0.45], [B[0], B[1], 0.45]], 0.8, 0.1);
+  }
+  composer(M, 0, 0, M.cw - 1, M.ch - 1);
+  M.sx0 = M.sy0 = Infinity; M.sx1 = M.sy1 = -1;
+  cacheMarge.set(cle, M.d32.slice());
+}
+function choisir(cle) {
+  outil = cle;
+  dessinerMarge();
+}
+
+// ---------- retour en arrière ----------
+function annuler() {
+  const e = histo.pop();
+  if (!e) return;
+  if (e.tissu) tissu = e.tissu;
+  for (const t of e.tuiles.values()) {
+    if (t.bx + t.w > F.S || t.by + t.h > F.S) continue;
+    for (let y = 0; y < t.h; y++) {
+      const o = (t.by + y) * F.S + t.bx;
+      F.G.set(t.g.subarray(y * t.w, y * t.w + t.w), o);
+      F.I.set(t.i.subarray(y * t.w, y * t.w + t.w), o);
+    }
+    sale(F, t.bx, t.by, t.bx + t.w - 1, t.by + t.h - 1);
+  }
+  montrer(F);
+  modifie = true; planifier();
+}
+function memoriser(e) {
+  histo.push(e);
+  while (histo.length > HISTO_MAX) histo.shift();
+}
+
+// ---------- dessiner ----------
+let trait = null;
+function point(cv, e) {
+  const rc = cv.getBoundingClientRect();
+  return [(e.clientX - rc.left) * cv.width / rc.width, (e.clientY - rc.top) * cv.height / rc.height];
+}
+function pression(e) {
+  if (e.pointerType === "mouse") return 0.5;
+  return e.pressure > 0 ? Math.min(1, e.pressure) : 0.05;
+}
+F.cv.addEventListener("pointerdown", e => {
+  if (e.pointerType === "touch") return; // la main et les doigts ne dessinent pas
+  e.preventDefault();
+  try { F.cv.setPointerCapture(e.pointerId); } catch (_) {}
+  const [x, y] = point(F.cv, e);
+  const p = pression(e);
+  F.enreg = new Map();
+  trait = { id: e.pointerId, x, y, p, t: e.timeStamp, v: 0, reste: 0, cle: outil, tissu,
+            tissuAvant: outil === "mouchoir" ? tissu.slice() : null };
+  if (OUTILS[outil].sorte !== "mouchoir") trait.reste = touche(F, outil, x, y, p, 1, 0, 0, 0);
+  montrer(F);
+});
+F.cv.addEventListener("pointermove", e => {
+  if (!trait || e.pointerId !== trait.id) return;
+  e.preventDefault();
+  const liste = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
+  for (const ev of (liste.length ? liste : [e])) {
+    const [x, y] = point(F.cv, ev);
+    const dt = Math.max(1, ev.timeStamp - trait.t);
+    trait.v = trait.v * 0.7 + (Math.hypot(x - trait.x, y - trait.y) / dt) * 0.3;
+    trait.t = ev.timeStamp;
+    avancer(F, trait, trait.cle, x, y, pression(ev), 1);
+  }
+  montrer(F);
+});
+function finir(e) {
+  if (!trait || e.pointerId !== trait.id) return;
+  if (F.enreg && F.enreg.size) { memoriser({ tuiles: F.enreg, tissu: trait.tissuAvant }); modifie = true; }
+  trait = null;
+  F.enreg = null;
+  montrer(F);
+  planifier();
+}
+F.cv.addEventListener("pointerup", finir);
+F.cv.addEventListener("pointercancel", finir);
+
+M.cv.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  const rc = M.cv.getBoundingClientRect();
+  const x = e.clientX - rc.left, y = e.clientY - rc.top;
+  const z = zones.find(z => y >= z.y0 && y <= z.y1 && (z.x0 === undefined || (x >= z.x0 && x <= z.x1)))
+         || zones.find(z => z.x0 === undefined && y >= z.y0 && y <= z.y1);
+  if (z) z.faire();
+});
+for (const cv of [F.cv, M.cv]) {
+  cv.addEventListener("contextmenu", e => e.preventDefault());
+  cv.addEventListener("touchstart", e => e.preventDefault(), { passive: false });
+}
+
+// ======================================================================
+// les dessins gardés sur la tablette
+// ======================================================================
+let courant = null;      // { id, cree }
+let modifie = false, minuterieSauve = 0, sauveEnCours = null;
+let baseP = null;
+function base() {
+  if (!baseP) baseP = new Promise(res => {
+    try {
+      const r = indexedDB.open("feuille", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("dessins", { keyPath: "id" });
+      r.onsuccess = () => res(r.result);
+      r.onerror = r.onblocked = () => res(null);
+    } catch (_) { res(null); }
+  });
+  return baseP;
+}
+async function requete(mode, fn) {
+  const db = await base();
+  if (!db) return null;
+  return new Promise((res, rej) => {
+    let r;
+    try {
+      const tx = db.transaction("dessins", mode);
+      r = fn(tx.objectStore("dessins"));
+      tx.oncomplete = () => res(r ? r.result : null);
+      tx.onerror = tx.onabort = () => rej(tx.error);
+    } catch (e) { rej(e); }
+  });
+}
+const tousLesDessins = () => requete("readonly", s => s.getAll()).catch(() => null);
+const lireDessin = id => requete("readonly", s => s.get(id)).catch(() => null);
+const ecrireDessin = rec => requete("readwrite", s => s.put(rec));
+const jeterDessin = id => requete("readwrite", s => s.delete(id));
+try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (_) {}
+
+async function compresser(buf) {
+  if (window.CompressionStream) {
+    const s = new Blob([buf]).stream().pipeThrough(new CompressionStream("gzip"));
+    return { blob: await new Response(s).blob(), gz: true };
+  }
+  return { blob: new Blob([buf]), gz: false };
+}
+async function decompresser(blob, gz) {
+  if (gz) return new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+  return blob.arrayBuffer();
+}
+function planifier() {
+  clearTimeout(minuterieSauve);
+  if (modifie) minuterieSauve = setTimeout(() => { if (trait) planifier(); else sauver_(); }, 1500);
+}
+async function sauver_() {
+  clearTimeout(minuterieSauve);
+  if (!courant || !modifie) return sauveEnCours;
+  if (sauveEnCours) { await sauveEnCours; return sauver_(); }
+  modifie = false;
+  sauveEnCours = (async () => {
+    const w = F.limX, h = F.ch, S = F.S, n = w * h;
+    const buf = new ArrayBuffer(n * 3), g16 = new Uint16Array(buf, 0, n), i8 = new Uint8Array(buf, n * 2, n);
+    const q = 65535 / GMAX;
+    for (let y = 0; y < h; y++) {
+      const o = y * S, d = y * w;
+      for (let x = 0; x < w; x++) { g16[d + x] = Math.min(65535, F.G[o + x] * q + 0.5); i8[d + x] = F.I[o + x] * 255 + 0.5; }
+    }
+    const apercu = await vignette(F.cv, w, h);
+    const { blob, gz } = await compresser(buf);
+    await ecrireDessin({ id: courant.id, cree: courant.cree, modifie: Date.now(), w, h, dpr: DPR, gz, donnees: blob, apercu });
+  })().catch(() => { modifie = true; }).finally(() => { sauveEnCours = null; });
+  return sauveEnCours;
+}
+function vignette(src, w, h) {
+  const tw = Math.min(w, 640), th = Math.round(h * tw / w);
+  const c = document.createElement("canvas");
+  c.width = tw; c.height = th;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, 0, 0, w, h, 0, 0, tw, th);
+  return new Promise(res => c.toBlob(b => res(b), "image/jpeg", 0.9));
+}
+async function chargerDans(rec, G, I, S, dpr = DPR) {
+  const ab = await decompresser(rec.donnees, rec.gz);
+  const n = rec.w * rec.h, g16 = new Uint16Array(ab, 0, n), i8 = new Uint8Array(ab, n * 2, n);
+  const q = GMAX / 65535;
+  // si l'écran n'a plus la même densité, on remet le dessin à sa taille réelle
+  const f = dpr / (rec.dpr || dpr);
+  const w = Math.min(Math.round(rec.w * f), S), h = Math.min(Math.round(rec.h * f), S);
+  for (let y = 0; y < h; y++) {
+    const o = y * S;
+    if (f === 1) {
+      const d = y * rec.w;
+      for (let x = 0; x < w; x++) { G[o + x] = g16[d + x] * q; I[o + x] = i8[d + x] / 255; }
+      continue;
+    }
+    const sy = Math.min(rec.h - 1, (y + 0.5) / f - 0.5), y0 = Math.max(0, Math.floor(sy)), y1 = Math.min(rec.h - 1, y0 + 1), ty = Math.max(0, sy - y0);
+    for (let x = 0; x < w; x++) {
+      const sx = Math.min(rec.w - 1, (x + 0.5) / f - 0.5), x0 = Math.max(0, Math.floor(sx)), x1 = Math.min(rec.w - 1, x0 + 1), tx = Math.max(0, sx - x0);
+      const a = y0 * rec.w + x0, b = y0 * rec.w + x1, c = y1 * rec.w + x0, d = y1 * rec.w + x1;
+      const mix = (A) => (A[a] * (1 - tx) + A[b] * tx) * (1 - ty) + (A[c] * (1 - tx) + A[d] * tx) * ty;
+      G[o + x] = mix(g16) * q; I[o + x] = mix(i8) / 255;
+    }
+  }
+}
+// pour la galerie : le dessin en grand, tel qu'il est sur la feuille
+async function imageComplete(rec) {
+  const w = rec.w, h = rec.h, S = Math.max(w, h);
+  const T = { S, G: new Float32Array(S * S), I: new Float32Array(S * S), cw: w, ch: h, ox: 0, ctx: null };
+  await chargerDans(rec, T.G, T.I, S, rec.dpr || DPR);
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  T.ctx = c.getContext("2d");
+  T.img = T.ctx.createImageData(w, h);
+  T.d32 = new Uint32Array(T.img.data.buffer);
+  composer(T, 0, 0, w - 1, h - 1);
+  return new Promise(res => c.toBlob(b => res(b), "image/png"));
+}
+async function versGalerie(rec) {
+  const blob = await imageComplete(rec);
+  const d = new Date(rec.modifie || Date.now()), z = v => String(v).padStart(2, "0");
+  const nom = `dessin ${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}h${z(d.getMinutes())}.png`;
+  if (window.FeuilleApp) {
+    const b64 = await new Promise(res => { const f = new FileReader(); f.onload = () => res(String(f.result).split(",")[1]); f.readAsDataURL(blob); });
+    window.FeuilleApp.enregistrer(nom, b64);
+    return;
+  }
+  let dl = null;
+  try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (_) {}
+  if (dl) { try { await dl.save({ filename: nom, data: blob }); } catch (_) {} return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = nom;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") { sauver_(); AMB.arreter(); }
+  else if (vue === "pile") AMB.demarrer();
+});
+addEventListener("pagehide", () => sauver_());
+
+// ======================================================================
+// la pile
+// ======================================================================
+let fondFait = "";
+function dessinerFond() {
+  const W = innerWidth, H = innerHeight, cle = W + "x" + H;
+  if (fondFait === cle) return;
+  fondFait = cle;
+  const P = feuilleLibre(W, H, 1);
+  P.cv = ELT.fond; P.ctx = ELT.fond.getContext("2d", { alpha: false });
+  P.cw = W; P.ch = H; P.cv.width = W; P.cv.height = H;
+  P.img = P.ctx.createImageData(W, H); P.d32 = new Uint32Array(P.img.data.buffer);
+  const k = f => f / DPR;
+  const I = repere(0, 0, 0);
+  tremble = 3;
+  // le gris couché à plat, en longs traits un peu penchés
+  for (let y = -20, n = 0; y < H + 30; y += 8, n++) {
+    const pts = [];
+    for (let x = -30; x <= W + 30; x += 40) pts.push([x, y + x * 0.06 + Math.sin(x * 0.01 + n) * 3, 0.62 + 0.18 * Math.sin(x * 0.004 + n * 0.7)]);
+    tracer(P, "crayon", pts, k(0.9));
+  }
+  // plus sombre vers le bas et les bords
+  for (let y = H * 0.55; y < H + 30; y += 9) tracer(P, "crayon", [[-20, y, 0.8], [W + 20, y + 10, 0.8]], k(1));
+  for (let x = -10; x < 120; x += 10) { tracer(P, "crayon", [[x, -20, 0.7], [x + 30, H + 20, 0.7]], k(1)); tracer(P, "crayon", [[W - x, -20, 0.7], [W - x - 30, H + 20, 0.7]], k(1)); }
+  // le mouchoir, en cercles sur tout le fond
+  {
+    const pts = [];
+    let a = 0;
+    const r = 30, bandes = Math.ceil(H / (r * 1.2));
+    for (let b = 0, sens = 1; b <= bandes; b++, sens = -sens) {
+      const yb = b * H / bandes;
+      for (let i = 0; i <= W / 9; i++) {
+        a += 0.5;
+        const xb = sens > 0 ? i * 9 : W - i * 9;
+        pts.push([xb + Math.cos(a) * r, yb + Math.sin(a) * r * 0.8, 0.6 + 0.25 * Math.sin(i * 0.2 + b)]);
+      }
+    }
+    tracer(P, "mouchoir", pts, k(1.4));
+  }
+  // la lumière : la mie en larges cercles légers depuis le haut à gauche, puis une grande traînée en biais
+  {
+    const pts = [];
+    let a = 0;
+    for (let i = 0; i < 700; i++) {
+      a += 0.45;
+      const t = i / 700, ray = Math.min(W, H) * (0.08 + 0.55 * t);
+      const cx = W * 0.18 + Math.cos(i * 0.031) * ray, cy = H * 0.05 + Math.abs(Math.sin(i * 0.031)) * ray * 0.8;
+      pts.push([cx + Math.cos(a) * 30, cy + Math.sin(a) * 26, 0.38 * (1 - t) + 0.08]);
+    }
+    tracer(P, "mie", pts, k(3));
+    for (let j = 0; j < 5; j++) tracer(P, "mie", [[W * (0.12 + j * 0.05), -30, 0.4], [W * (0.55 + j * 0.06), H * 1.05, 0.22]], k(4.5));
+  }
+  // et on refrotte tout, pour que rien ne reste net
+  for (let pass = 0; pass < 2; pass++) {
+    const pts = [];
+    let a = pass * 2;
+    const r = 34, bandes = Math.ceil(H / (r * 1.1));
+    for (let b = 0, sens = 1; b <= bandes; b++, sens = -sens) {
+      const yb = b * H / bandes + pass * 14;
+      for (let i = 0; i <= W / 10; i++) {
+        a += 0.5;
+        const xb = sens > 0 ? i * 10 : W - i * 10;
+        pts.push([xb + Math.cos(a) * r, yb + Math.sin(a) * r * 0.8, 0.75]);
+      }
+    }
+    tracer(P, "mouchoir", pts, k(1.6));
+  }
+  composer(P, 0, 0, W - 1, H - 1);
+  // un fond frotté longtemps : le graphite y est lisse, seul le grain du papier reste
+  const d = P.img.data, n = W * H, ch = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) ch[c][i] = d[i * 4 + c];
+  const tmp = new Float32Array(Math.max(W, H));
+  const flou = (A, r) => {
+    for (let y = 0; y < H; y++) {           // lignes
+      let s = 0; const o = y * W;
+      for (let x = -r; x <= r; x++) s += A[o + Math.min(W - 1, Math.max(0, x))];
+      for (let x = 0; x < W; x++) { tmp[x] = s / (2 * r + 1); s += A[o + Math.min(W - 1, x + r + 1)] - A[o + Math.max(0, x - r)]; }
+      for (let x = 0; x < W; x++) A[o + x] = tmp[x];
+    }
+    for (let x = 0; x < W; x++) {           // colonnes
+      let s = 0;
+      for (let y = -r; y <= r; y++) s += A[Math.min(H - 1, Math.max(0, y)) * W + x];
+      for (let y = 0; y < H; y++) { tmp[y] = s / (2 * r + 1); s += A[Math.min(H - 1, y + r + 1) * W + x] - A[Math.max(0, y - r) * W + x]; }
+      for (let y = 0; y < H; y++) A[y * W + x] = tmp[y];
+    }
+  };
+  for (const A of ch) for (let p = 0; p < 3; p++) flou(A, 5);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, gr = (grainEn(x * 2, y * 2) - 0.5) * 9;
+    for (let c = 0; c < 3; c++) d[i * 4 + c] = ch[c][i] + gr;
+    d[i * 4 + 3] = 255;
+  }
+  P.ctx.putImageData(P.img, 0, 0);
+}
+let ombreCarte = null;
+function fabriquerOmbre() {
+  if (ombreCarte) return ombreCarte;
+  // l'ombre d'une feuille posée : un voile de graphite qui s'éteint doucement vers les bords
+  const N = 160, c = document.createElement("canvas");
+  c.width = N; c.height = N;
+  const ctx = c.getContext("2d"), img = ctx.createImageData(N, N), d = img.data;
+  const m0 = 0.1 * N, m1 = 0.9 * N, f = 0.075 * N;
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const dx = Math.max(m0 - x, 0, x - m1), dy = Math.max(m0 - y, 0, y - m1);
+    let t = 1 - Math.hypot(dx, dy) / f;
+    if (t <= 0) continue;
+    t = t * t * (3 - 2 * t);
+    const o = (y * N + x) * 4;
+    d[o] = MINE[0] * 0.6; d[o + 1] = MINE[1] * 0.6; d[o + 2] = MINE[2] * 0.6;
+    d[o + 3] = 255 * 0.5 * t * (0.86 + 0.28 * grainEn(x * 3, y * 3));
+  }
+  ctx.putImageData(img, 0, 0);
+  ombreCarte = c.toDataURL();
+  return ombreCarte;
+}
+let papierVierge = null;
+function fabriquerVierge(w, h) {
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d"), img = ctx.createImageData(w, h), d32 = new Uint32Array(img.data.buffer);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const pa = 1 - 0.028 * (1 - grainEn(x * 2, y * 2));
+    d32[y * w + x] = 0xff000000 | ((PAPIER[2] * pa | 0) << 16) | ((PAPIER[1] * pa | 0) << 8) | (PAPIER[0] * pa | 0);
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL();
+}
+// marques posées sur une feuille soulevée : la flèche vers la galerie, la croix pour jeter
+function fabriquerMarques(appuye) {
+  const T = feuilleLibre(104, 50);
+  tremble = 5;
+  const I = repere(0, 0, 0);
+  // vers la galerie : une flèche qui descend dans un bac
+  tr(T, "feutre", I, [[24, 9, 0.35], [24.5, 31, 0.6]], 0.85, 0.15);
+  tr(T, "feutre", I, [[17, 24, 0.4], [24.5, 32, 0.65], [32, 23.5, 0.4]], 0.85, 0.15);
+  tr(T, "feutre", I, [[11, 32, 0.3], [11.5, 41, 0.45], [37.5, 41, 0.45], [38, 32, 0.3]], 0.85, 0.15);
+  // jeter : une croix
+  const p = appuye ? 0.95 : 0.55, kk = appuye ? 1.25 : 0.9;
+  tr(T, "feutre", I, [[66, 13, p * 0.7], [88, 37, p]], kk, 0.2);
+  tr(T, "feutre", I, [[88, 12, p * 0.7], [66.5, 38, p]], kk, 0.2);
+  if (appuye) { tr(T, "feutre", I, [[66, 15, 0.8], [87, 38, 0.9]], 1.1, 0.25); }
+  return versTransparent(T);
+}
+
+// ---------- l'ambiance de la pile : un fond animé au choix, et le chat ----------
+let reglages = { scene: "lune" };
+try { Object.assign(reglages, JSON.parse(localStorage.getItem("feuille-reglages") || "{}")); } catch (_) {}
+const AMB = window.__ambiance.creer(document.getElementById("ciel"), document.getElementById("ciel2"), document.getElementById("affiche"));
+if (!window.__ambiance.NOMS.includes(reglages.scene)) reglages.scene = "lune";
+function appliquerAmbiance() {
+  AMB.choisir(reglages.scene);
+  ELT.fond.style.display = reglages.scene === "graphite" ? "" : "none";
+  if (reglages.scene === "graphite") dessinerFond();
+  if (vue === "pile" && document.visibilityState !== "hidden") AMB.demarrer();
+}
+function garderReglages() { try { localStorage.setItem("feuille-reglages", JSON.stringify(reglages)); } catch (_) {} }
+
+let dessins = [];          // fiches de la pile (sans les données)
+let urls = [];
+let levee = null, confirmeJeter = false, minuterieJeter = 0;
+async function remplirPile(entree = false) {
+  const tous = (await tousLesDessins()) || [];
+  tous.sort((a, b) => b.modifie - a.modifie);
+  dessins = tous.map(r => ({ id: r.id, w: r.w, h: r.h, cree: r.cree, modifie: r.modifie, apercu: r.apercu }));
+  disposerPile(entree);
+}
+function hacher(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return (h >>> 0) / 4294967296; }
+let taillePile = "";
+function disposerPile(entree = false) {
+  taillePile = innerWidth + "x" + innerHeight;
+  if (reglages.scene === "graphite") dessinerFond();
+  for (const u of urls) URL.revokeObjectURL(u);
+  urls = [];
+  levee = null;
+  const W = innerWidth, H = innerHeight;
+  const cols = W < 560 ? 2 : W > H ? 4 : 3;
+  const bord = Math.max(22, W * 0.045), gout = Math.max(22, W * 0.04);
+  const lc = (W - 2 * bord - gout * (cols - 1)) / cols;
+  const ratioEcran = (F.limX || W * DPR - MARGE * DPR) / (F.ch || H * DPR);
+  const fiches = [{ id: "nouvelle", w: ratioEcran, h: 1 }, ...dessins];
+  ELT.contenu.textContent = "";
+  let y = bord + 6, haut = 0;
+  fiches.forEach((f, n) => {
+    const col = n % cols;
+    if (col === 0 && n > 0) { y += haut + gout; haut = 0; }
+    const hc = lc * f.h / f.w;
+    haut = Math.max(haut, hc);
+    const r = hacher(f.id), r2 = hacher(f.id + "*");
+    const a = (r - 0.5) * 3.2, dx = (r2 - 0.5) * 8, dy = (r - 0.5) * 6;
+    const el = document.createElement("div");
+    el.className = "carte";
+    el.dataset.id = f.id;
+    el.style.cssText = `left:${bord + col * (lc + gout) + dx}px;top:${y + dy}px;width:${lc}px;height:${hc}px;transform:rotate(${a}deg)`;
+    el.dataset.angle = a;
+    if (entree) {
+      // les feuilles se posent une à une sur la pile
+      el.classList.add("arrive");
+      el.style.setProperty("--a", a + "deg"); el.style.setProperty("--x", ((r2 - 0.5) * 30) + "px"); el.style.setProperty("--d", (Math.min(n, 14) * 0.055) + "s");
+      el.addEventListener("animationend", () => el.classList.remove("arrive"), { once: true });
+    }
+    const om = document.createElement("img");
+    om.className = "ombre"; om.src = fabriquerOmbre(); om.alt = "";
+    const vu = document.createElement("img");
+    vu.className = "vue"; vu.alt = "";
+    if (f.id === "nouvelle") vu.src = papierVierge || (papierVierge = fabriquerVierge(160, 100));
+    else if (f.apercu) { const u = URL.createObjectURL(f.apercu); urls.push(u); vu.src = u; }
+    el.append(om, vu);
+    ELT.contenu.appendChild(el);
+  });
+  ELT.contenu.style.height = (y + haut + bord + 30) + "px";
+}
+function lever(el) {
+  baisser();
+  levee = el;
+  el.style.transform = "rotate(0deg) scale(1.05)";
+  el.style.zIndex = 3;
+  el.querySelector(".ombre").style.transform = "translate(7px,11px) scale(1.04)";
+  const m = fabriquerMarques(false);
+  m.className = "marques";
+  el.appendChild(m);
+}
+function baisser() {
+  if (!levee) return;
+  const el = levee;
+  levee = null; confirmeJeter = false; clearTimeout(minuterieJeter);
+  el.style.transform = `rotate(${el.dataset.angle}deg)`;
+  el.style.zIndex = "";
+  el.querySelector(".ombre").style.transform = "";
+  const m = el.querySelector(".marques");
+  if (m) m.remove();
+}
+function remplacerMarques(appuye) {
+  if (!levee) return;
+  const m = levee.querySelector(".marques");
+  const n = fabriquerMarques(appuye);
+  n.className = "marques";
+  if (m) m.replaceWith(n); else levee.appendChild(n);
+}
+// toucher la pile : toucher = ouvrir ; appui long = soulever la feuille
+{
+  let depart = null, minuterie = 0, longue = false;
+  ELT.cartes.addEventListener("pointerdown", e => {
+    const el = e.target.closest(".carte");
+    depart = { x: e.clientX, y: e.clientY, el };
+    longue = false;
+    clearTimeout(minuterie);
+    if (el && el.dataset.id !== "nouvelle") minuterie = setTimeout(() => { longue = true; lever(el); }, 430);
+    else if (!el && !levee) minuterie = setTimeout(() => { longue = true; ouvrirReglages(); }, 520);
+  });
+  ELT.cartes.addEventListener("pointermove", e => {
+    if (depart && Math.hypot(e.clientX - depart.x, e.clientY - depart.y) > 10) { clearTimeout(minuterie); depart = null; }
+  });
+  const fin = e => {
+    clearTimeout(minuterie);
+    if (!depart || longue) { depart = null; return; }
+    const el = depart.el;
+    depart = null;
+    if (levee) {
+      const m = levee.querySelector(".marques");
+      if (el === levee && m) {
+        const rc = m.getBoundingClientRect();
+        if (e.clientX >= rc.left - 6 && e.clientY >= rc.top - 8 && e.clientX <= rc.right + 6 && e.clientY <= rc.bottom + 6) {
+          const id = levee.dataset.id;
+          if (e.clientX < rc.left + rc.width * 0.5) {
+            lireDessin(id).then(rec => rec && versGalerie(rec));
+          } else if (!confirmeJeter) {
+            confirmeJeter = true; remplacerMarques(true);
+            clearTimeout(minuterieJeter);
+            minuterieJeter = setTimeout(() => { confirmeJeter = false; remplacerMarques(false); }, 1800);
+          } else {
+            jeterDessin(id).then(remplirPile);
+          }
+          return;
+        }
+      }
+      baisser();
+      return;
+    }
+    if (el) ouvrir(el);
+  };
+  ELT.cartes.addEventListener("pointerup", fin);
+  ELT.cartes.addEventListener("pointercancel", () => { clearTimeout(minuterie); depart = null; });
+  ELT.cartes.addEventListener("contextmenu", e => e.preventDefault());
+}
+
+// ---------- choisir le fond : des cartes postales posées devant la pile ----------
+function ouvrirReglages() {
+  if (document.getElementById("reglages")) return;
+  const R = document.createElement("div");
+  R.id = "reglages";
+  const W = innerWidth, H = innerHeight;
+  const lw = Math.max(110, Math.min(250, W / 6.6)), lh = Math.round(lw * H / W);
+  const rang1 = document.createElement("div"), rang2 = document.createElement("div");
+  rang1.className = rang2.className = "rang";
+  const carte = (canvas, pris, angle, faire) => {
+    const d = document.createElement("div");
+    d.className = "choix" + (pris ? " pris" : "");
+    d.style.setProperty("--a", angle + "deg");
+    d.appendChild(canvas);
+    d.addEventListener("pointerup", e => { e.stopPropagation(); faire(d); });
+    d.addEventListener("pointerdown", e => e.stopPropagation());
+    return d;
+  };
+  window.__ambiance.NOMS.forEach((n, i) => {
+    let cv;
+    if (n === "graphite") {
+      cv = document.createElement("canvas"); cv.width = lw * 2; cv.height = lh * 2;
+      const x = cv.getContext("2d");
+      if (ELT.fond.width > 1 && fondFait) x.drawImage(ELT.fond, 0, 0, cv.width, cv.height);
+      else { const g = x.createLinearGradient(0, 0, 0, cv.height); g.addColorStop(0, "#9a9ba0"); g.addColorStop(1, "#5d5e63"); x.fillStyle = g; x.fillRect(0, 0, cv.width, cv.height); }
+    } else {
+      cv = document.createElement("img"); cv.src = AMB.carte(n); cv.alt = "";
+    }
+    cv.style.width = lw + "px"; cv.style.height = lh + "px";
+    rang1.appendChild(carte(cv, reglages.scene === n, (hacher(n) - 0.5) * 5, d => {
+      reglages.scene = n; garderReglages();
+      rang1.querySelectorAll(".choix").forEach(c => c.classList.toggle("pris", c === d));
+      appliquerAmbiance();
+    }));
+  });
+  R.append(rang1);
+  const fermer = () => { R.classList.remove("ouvert"); setTimeout(() => R.remove(), 380); };
+  R.addEventListener("pointerup", fermer);
+  document.body.appendChild(R);
+  requestAnimationFrame(() => requestAnimationFrame(() => R.classList.add("ouvert")));
+}
+
+// ---------- passer de la pile à la feuille, et retour ----------
+let enMouvement = false;
+function envol(src, depuis, vers, fini) {
+  const im = document.createElement("img");
+  im.className = "envol"; im.src = src;
+  const pose = r => `translate(${r.x}px,${r.y}px) rotate(${r.a || 0}deg) scale(${r.w / 100},${r.h / 100})`;
+  im.style.width = "100px"; im.style.height = "100px";
+  im.style.transform = pose(depuis);
+  document.body.appendChild(im);
+  im.getBoundingClientRect();
+  requestAnimationFrame(() => { im.style.transform = pose(vers); });
+  let fait = false;
+  const fin = () => { if (fait) return; fait = true; fini(); requestAnimationFrame(() => im.remove()); };
+  im.addEventListener("transitionend", fin);
+  setTimeout(fin, 520);
+}
+function rectCarte(el) {
+  const a = +el.dataset.angle || 0, w = el.offsetWidth, h = el.offsetHeight;
+  const rc = el.getBoundingClientRect();
+  // coin haut-gauche de la carte tournée autour de son centre
+  const cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2, t = a * Math.PI / 180;
+  return { x: cx - (w / 2) * Math.cos(t) + (h / 2) * Math.sin(t), y: cy - (w / 2) * Math.sin(t) - (h / 2) * Math.cos(t), w, h, a };
+}
+async function ouvrir(el) {
+  if (enMouvement) return;
+  enMouvement = true;
+  const id = el.dataset.id;
+  const src = el.querySelector(".vue").src;
+  const depuis = rectCarte(el);
+  F.G.fill(0); F.I.fill(0);
+  histo.length = 0;
+  tissu = new Float32Array(TS * TS);
+  modifie = false;
+  let rec = null;
+  if (id === "nouvelle") courant = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), cree: Date.now() };
+  else {
+    rec = await lireDessin(id);
+    courant = { id, cree: rec ? rec.cree : Date.now() };
+    if (rec) { try { await chargerDans(rec, F.G, F.I, F.S); } catch (_) {} }
+  }
+  const vers = { x: 0, y: 0, w: rec ? rec.w / (rec.dpr || DPR) : F.limX / DPR, h: rec ? rec.h / (rec.dpr || DPR) : F.ch / DPR, a: 0 };
+  envol(src, depuis, vers, () => {
+    vue = "feuille";
+    AMB.arreter();
+    ELT.dessin.classList.remove("cache");
+    ELT.pile.classList.add("cache");
+    dimensionnerTout();
+    composer(F, 0, 0, F.cw - 1, F.ch - 1);
+    dessinerMarge();
+    enMouvement = false;
+  });
+}
+async function allerPile() {
+  if (enMouvement) return;
+  enMouvement = true;
+  if (modifie) await sauver_(); else if (sauveEnCours) await sauveEnCours;
+  const src = await new Promise(res => vignette(F.cv, F.limX, F.ch).then(b => res(URL.createObjectURL(b))));
+  vue = "pile";
+  ELT.pile.classList.remove("cache");
+  appliquerAmbiance();
+  await remplirPile();
+  ELT.cartes.scrollTop = 0;
+  const el = courant && ELT.contenu.querySelector(`[data-id="${courant.id}"]`);
+  const vers = el ? rectCarte(el) : { x: innerWidth / 2, y: innerHeight / 2, w: 1, h: 1, a: 0 };
+  if (el) el.style.visibility = "hidden";
+  ELT.dessin.classList.add("cache");
+  envol(src, { x: 0, y: 0, w: F.limX / DPR, h: F.ch / DPR, a: 0 }, vers, () => {
+    if (el) el.style.visibility = "";
+    URL.revokeObjectURL(src);
+    enMouvement = false;
+  });
+}
+
+addEventListener("resize", dimensionnerTout);
+if (window.ResizeObserver) new ResizeObserver(dimensionnerTout).observe(document.body);
+dimensionnerTout();
+appliquerAmbiance();
+remplirPile(true);
+window.__feuille = { choisir, dessinerMarge, F, M };
+})();
+</script>
+
+</html>
