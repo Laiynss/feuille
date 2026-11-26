@@ -77,7 +77,8 @@ canvas{display:block}
 .carte .invite b{font:inherit;font-size:1.7em;line-height:.8;color:rgba(44,45,52,.5)}
 .legende{position:absolute;left:2px;right:2px;top:calc(100% + 16px);display:flex;justify-content:space-between;gap:10px;font:500 15px "Mincho",serif;letter-spacing:.4px;color:var(--encre);opacity:.78;text-shadow:0 1px 10px var(--halo);pointer-events:none;white-space:nowrap;overflow:hidden}
 .legende .carnet{color:var(--accent);opacity:1}
-.menu{position:fixed;z-index:9;filter:drop-shadow(0 2px 2px rgba(0,0,0,.3)) drop-shadow(0 22px 34px rgba(0,0,0,.5));transform:rotate(-4deg) translateY(14px) scale(.94);opacity:0;transition:opacity .16s,transform .3s cubic-bezier(.2,.8,.25,1)}
+.menu::before{content:"";position:absolute;z-index:-1;inset:7px 3px 3px 5px;box-shadow:0 2px 3px rgba(0,0,0,.35),0 14px 26px rgba(0,0,0,.4),0 34px 60px rgba(0,0,0,.4)}
+.menu{position:fixed;z-index:9;transform:rotate(-4deg) translateY(14px) scale(.94);opacity:0;transition:opacity .16s,transform .3s cubic-bezier(.2,.8,.25,1)}
 .menu.ouvert{opacity:1;transform:rotate(-1.6deg)}
 .menu .bout{min-width:280px;padding:26px 36px 26px 30px;color:#29292f;background-color:var(--papier);background-size:cover;font-family:"Crayon",cursive}
 .menu .choix{display:block;width:100%;text-align:left;font:inherit;font-size:38px;line-height:1.08;color:inherit;background:none;border:0;padding:9px 0 7px;cursor:pointer;-webkit-tap-highlight-color:transparent}
@@ -1520,7 +1521,8 @@ function ouvrirFonds() {
     t.style.setProperty("--c", n === "graphite" ? "#d9dade" : s.accent);
     t.style.transitionDelay = 60 + i * 60 + "ms, " + (60 + i * 60) + "ms, 0ms";
     const im = el("img"); im.alt = "";
-    if (n !== "graphite") im.src = `fonds/rendu/${n}/affiche.jpg`; else im.classList.add("graphite");
+    if (n !== "graphite") im.src = `fonds/rendu/${n}/affiche.jpg`;
+    else { im.classList.add("graphite"); try { dessinerFond(); im.src = ELT.fond.toDataURL("image/jpeg", 0.85); } catch (_) {} }
     t.append(im, el("span", "kanji", s.kanji), el("span", "nom", s.nom));
     t.addEventListener("click", e => { e.stopPropagation(); choisirScene(n); fermerFonds(); });
     rang.append(t);
