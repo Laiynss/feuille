@@ -21,23 +21,19 @@ canvas{display:block}
 #ciel,#ciel2{opacity:0}
 #ciel.pret,#ciel2.pret{opacity:1}
 #affiche.cache-doux,#ciel.cache-doux{opacity:0}
-#cartes{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;touch-action:pan-y;-webkit-overflow-scrolling:touch}
-#cartes .contenu{position:relative}
-.carte{position:absolute;transition:transform .22s cubic-bezier(.2,.7,.3,1)}
-.carte .ombre{position:absolute;left:-9%;top:-7%;width:124%;height:126%;pointer-events:none;transition:transform .22s cubic-bezier(.2,.7,.3,1),opacity .22s}
+#cartes{position:absolute;inset:0;overflow:hidden;touch-action:none}
+#cartes .contenu{position:absolute;inset:0;perspective:1600px;perspective-origin:30% -10%}
+.carte{position:absolute;left:0;top:0;transform-origin:50% 50%;will-change:transform;isolation:isolate;background:var(--papier);box-sizing:border-box;border-bottom:1.5px solid #c9c4b9;
+  transition:transform .5s cubic-bezier(.2,.75,.25,1),opacity .5s,box-shadow .5s;
+  box-shadow:0 .5px 1px rgba(0,0,0,.35),0 3px 9px rgba(0,0,0,.28),0 14px 34px rgba(0,0,0,.22)}
+.carte.levee{box-shadow:0 1px 2px rgba(0,0,0,.3),0 10px 22px rgba(0,0,0,.3),0 30px 60px rgba(0,0,0,.3)}
 .carte .vue{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.carte .lumiere{position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 1px rgba(0,0,0,.25),inset 0 0 22px rgba(40,35,30,.1)}
+.carte .lumiere::after{content:"";position:absolute;inset:0;background:rgba(22,20,18,var(--fonce,0));transition:background .5s}
 .carte .marques{position:absolute;right:4px;bottom:4px;pointer-events:none}
 .envol{position:fixed;left:0;top:0;transform-origin:0 0;pointer-events:none;z-index:5;transition:transform .32s cubic-bezier(.3,.6,.2,1)}
 .cache{display:none !important}
-.carte.arrive{animation:arrive .55s cubic-bezier(.2,.75,.3,1) both;animation-delay:var(--d)}
-@keyframes arrive{from{opacity:0;transform:translate(var(--x),-46px) rotate(calc(var(--a) + 7deg)) scale(1.07)}to{opacity:1;transform:rotate(var(--a))}}
-#reglages{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5vh;background:rgba(6,5,10,0);transition:background .35s}
-#reglages.ouvert{background:rgba(6,5,10,.55)}
-#reglages .rang{display:flex;gap:2.2vw;align-items:flex-end;flex-wrap:wrap;justify-content:center;padding:0 16px}
-#reglages .choix{position:relative;background:var(--papier);padding:7px 7px 7px;box-shadow:0 10px 26px rgba(0,0,0,.45);transition:transform .25s cubic-bezier(.2,.7,.3,1),box-shadow .25s,opacity .35s;opacity:0;transform:translateY(30px) rotate(var(--a))}
-#reglages.ouvert .choix{opacity:1;transform:translateY(0) rotate(var(--a))}
-#reglages.ouvert .choix.pris{transform:translateY(-14px) rotate(0deg) scale(1.08);box-shadow:0 22px 40px rgba(0,0,0,.6)}
-#reglages .choix canvas,#reglages .choix img{display:block;object-fit:cover}
+#instant{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;transition:opacity 1s ease}
 </style>
 
 <div id="dessin" class="cache">
@@ -973,7 +969,7 @@ async function sauver_() {
   return sauveEnCours;
 }
 function vignette(src, w, h) {
-  const tw = Math.min(w, 640), th = Math.round(h * tw / w);
+  const tw = Math.min(w, 1280), th = Math.round(h * tw / w);
   const c = document.createElement("canvas");
   c.width = tw; c.height = th;
   const ctx = c.getContext("2d");
@@ -1200,63 +1196,128 @@ function garderReglages() { try { localStorage.setItem("feuille-reglages", JSON.
 let dessins = [];          // fiches de la pile (sans les données)
 let urls = [];
 let levee = null, confirmeJeter = false, minuterieJeter = 0;
-async function remplirPile(entree = false) {
+let fiches = [], tete = 0;  // la pile : fiches[tete] est dessus, les suivantes dessous
+async function remplirPile(entree = false, dessus = null) {
   const tous = (await tousLesDessins()) || [];
   tous.sort((a, b) => b.modifie - a.modifie);
   dessins = tous.map(r => ({ id: r.id, w: r.w, h: r.h, cree: r.cree, modifie: r.modifie, apercu: r.apercu }));
-  disposerPile(entree);
+  disposerPile(entree, dessus);
 }
 function hacher(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return (h >>> 0) / 4294967296; }
 let taillePile = "";
-function disposerPile(entree = false) {
+const VISIBLES = 7;
+const INCLINE = 42;   // les feuilles sont posées à plat devant le décor
+let viergeFaite = "";
+function disposerPile(entree = false, dessus = null) {
   taillePile = innerWidth + "x" + innerHeight;
   if (reglages.scene === "graphite") dessinerFond();
   for (const u of urls) URL.revokeObjectURL(u);
   urls = [];
   levee = null;
-  const W = innerWidth, H = innerHeight;
-  const cols = W < 560 ? 2 : W > H ? 4 : 3;
-  const bord = Math.max(22, W * 0.045), gout = Math.max(22, W * 0.04);
-  const lc = (W - 2 * bord - gout * (cols - 1)) / cols;
-  const ratioEcran = (F.limX || W * DPR - MARGE * DPR) / (F.ch || H * DPR);
-  const fiches = [{ id: "nouvelle", w: ratioEcran, h: 1 }, ...dessins];
+  const ratioEcran = (F.limX || innerWidth * DPR - MARGE * DPR) / (F.ch || innerHeight * DPR);
+  fiches = [{ id: "nouvelle", w: ratioEcran, h: 1 }, ...dessins];
+  if (entree) tete = fiches.length > 1 ? 1 : 0;   // à l'ouverture, le dernier dessin est dessus ; la feuille neuve juste derrière (glisser vers la droite)
+  else if (dessus) { const i = fiches.findIndex(f => f.id === dessus); tete = i >= 0 ? i : 0; }
+  else tete = Math.min(tete, fiches.length - 1);
   ELT.contenu.textContent = "";
-  let y = bord + 6, haut = 0;
-  fiches.forEach((f, n) => {
-    const col = n % cols;
-    if (col === 0 && n > 0) { y += haut + gout; haut = 0; }
-    const hc = lc * f.h / f.w;
-    haut = Math.max(haut, hc);
-    const r = hacher(f.id), r2 = hacher(f.id + "*");
-    const a = (r - 0.5) * 3.2, dx = (r2 - 0.5) * 8, dy = (r - 0.5) * 6;
+  const { w: lw } = taillesPile();
+  const vw = Math.round(lw * DPR), vh = Math.round(lw * DPR / ratioEcran), cle = vw + "x" + vh;
+  if (viergeFaite !== cle) { papierVierge = fabriquerVierge(vw, vh); viergeFaite = cle; }
+  fiches.forEach(f => {
     const el = document.createElement("div");
     el.className = "carte";
     el.dataset.id = f.id;
-    el.style.cssText = `left:${bord + col * (lc + gout) + dx}px;top:${y + dy}px;width:${lc}px;height:${hc}px;transform:rotate(${a}deg)`;
-    el.dataset.angle = a;
-    if (entree) {
-      // les feuilles se posent une à une sur la pile
-      el.classList.add("arrive");
-      el.style.setProperty("--a", a + "deg"); el.style.setProperty("--x", ((r2 - 0.5) * 30) + "px"); el.style.setProperty("--d", (Math.min(n, 14) * 0.055) + "s");
-      el.addEventListener("animationend", () => el.classList.remove("arrive"), { once: true });
-    }
-    const om = document.createElement("img");
-    om.className = "ombre"; om.src = fabriquerOmbre(); om.alt = "";
     const vu = document.createElement("img");
     vu.className = "vue"; vu.alt = "";
-    if (f.id === "nouvelle") vu.src = papierVierge || (papierVierge = fabriquerVierge(160, 100));
+    if (f.id === "nouvelle") vu.src = papierVierge;
     else if (f.apercu) { const u = URL.createObjectURL(f.apercu); urls.push(u); vu.src = u; }
-    el.append(om, vu);
+    const lu = document.createElement("div");
+    lu.className = "lumiere";
+    if (dernierJour) lu.style.background = dernierJour;
+    el.append(vu, lu);
+    f.el = el;
     ELT.contenu.appendChild(el);
   });
-  ELT.contenu.style.height = (y + haut + bord + 30) + "px";
+  placerPile(entree);
+}
+function taillesPile() {
+  const W = innerWidth, H = innerHeight;
+  const w = W > H ? Math.min(760, Math.max(280, W * 0.4)) : Math.min(640, W * 0.62);
+  return { w, cx: W * 0.04 + w / 2, bas: H * 1.02 };
+}
+// chaque feuille a sa façon d'être posée (tirée de son nom), plus de travers à mesure qu'elle est profonde
+function poseFiche(f, d) {
+  const { w: lw, cx, bas } = taillesPile();
+  let w = lw, h = lw * f.h / f.w;
+  const hmax = innerHeight * 0.58;
+  if (h > hmax) { w *= hmax / h; h = hmax; }
+  const r = hacher(f.id), r2 = hacher(f.id + "*"), r3 = hacher(f.id + "#");
+  const a = d === 0 ? (r - 0.5) * 5 : Math.max(-16, Math.min(16, (r - 0.5) * (9 + d * 3)));
+  const dx = d === 0 ? 0 : (r2 - 0.5) * (30 + d * 12);
+  const dy = d === 0 ? 0 : (r3 - 0.5) * (10 + d * 4) - d * 6;
+  const x = cx - w / 2 + dx, y = bas - h + dy;
+  return { w, h, a, x, y, t: `translate(${x}px,${y}px) rotateX(${INCLINE}deg) rotate(${a}deg)` };
+}
+function placerPile(entree = false) {
+  const n = fiches.length;
+  fiches.forEach((f, i) => {
+    const d = (i - tete + n) % n, el = f.el, p = poseFiche(f, d);
+    el.style.width = p.w + "px"; el.style.height = p.h + "px";
+    el.style.zIndex = 100 - d;
+    el.dataset.angle = p.a;
+    el.dataset.prof = d;
+    el.style.setProperty("--fonce", Math.min(0.22, d * 0.045).toFixed(3));   // plus bas dans la pile, moins de lumière
+    el._pose = p.t;
+    const vis = d < VISIBLES;
+    if (entree && vis) {
+      // les feuilles tombent sur la pile une à une, la plus profonde d'abord
+      el.style.transition = "none";
+      el.style.opacity = 0;
+      el.style.transform = `translate(${p.x + (hacher(f.id + "~") - 0.5) * 40}px,${p.y - 60}px) rotate(${p.a + 6}deg) scale(1.06)`;
+      el.getBoundingClientRect();
+      el.style.transition = "";
+      setTimeout(() => { el.style.opacity = 1; el.style.transform = p.t; }, 120 + (Math.min(n, VISIBLES) - 1 - d) * 70);
+    } else {
+      el.style.opacity = vis ? 1 : 0;
+      el.style.transform = p.t;
+    }
+    el.style.pointerEvents = vis ? "" : "none";
+  });
+}
+// la feuille du dessus part sur le côté et repasse sous la pile ; ou celle du dessous revient dessus
+function feuilleSuivante(el, vx, vy) {
+  const n = fiches.length;
+  if (n < 2) { el.style.transform = el._pose; return; }
+  const p = fiches[tete].el.getBoundingClientRect(), wd = p.width;
+  const sx = vx === 0 && vy === 0 ? -1 : vx, sy = vy;
+  const nn = Math.hypot(sx, sy) || 1;
+  el.style.transition = "transform .24s cubic-bezier(.3,.6,.4,1)";
+  el.style.transform = `${el._pose.replace(/translate\(([-\d.]+)px,([-\d.]+)px\)/, (m, x, y) => `translate(${+x + sx / nn * wd * 1.05}px,${+y + sy / nn * wd * 0.5}px)`)} rotate(${sx < 0 ? -8 : 8}deg)`;
+  setTimeout(() => {
+    el.style.transition = "";
+    el.style.zIndex = 0;
+    tete = (tete + 1) % n;
+    placerPile();
+  }, 230);
+}
+function feuillePrecedente() {
+  const n = fiches.length;
+  if (n < 2) return;
+  const i = (tete - 1 + n) % n, el = fiches[i].el, p = poseFiche(fiches[i], 0);
+  el.style.transition = "none";
+  el.style.zIndex = 101;
+  el.style.opacity = 1;
+  el.style.transform = `translate(${p.x + p.w * 1.05}px,${p.y - p.h * 0.1}px) rotate(${p.a + 9}deg)`;
+  el.getBoundingClientRect();
+  el.style.transition = "";
+  tete = i;
+  placerPile();
 }
 function lever(el) {
   baisser();
   levee = el;
-  el.style.transform = "rotate(0deg) scale(1.05)";
-  el.style.zIndex = 3;
-  el.querySelector(".ombre").style.transform = "translate(7px,11px) scale(1.04)";
+  el.style.transform = el._pose + " scale(1.05)";
+  el.classList.add("levee");
   const m = fabriquerMarques(false);
   m.className = "marques";
   el.appendChild(m);
@@ -1265,9 +1326,8 @@ function baisser() {
   if (!levee) return;
   const el = levee;
   levee = null; confirmeJeter = false; clearTimeout(minuterieJeter);
-  el.style.transform = `rotate(${el.dataset.angle}deg)`;
-  el.style.zIndex = "";
-  el.querySelector(".ombre").style.transform = "";
+  el.style.transform = el._pose;
+  el.classList.remove("levee");
   const m = el.querySelector(".marques");
   if (m) m.remove();
 }
@@ -1278,25 +1338,46 @@ function remplacerMarques(appuye) {
   n.className = "marques";
   if (m) m.replaceWith(n); else levee.appendChild(n);
 }
-// toucher la pile : toucher = ouvrir ; appui long = soulever la feuille
+// toucher la pile : toucher la feuille du dessus = l'ouvrir ; la glisser = passer à la suivante (à droite : revenir) ;
+// appui long = la soulever ; toucher une feuille du dessous = la remettre dessus.
+// glisser sur le décor = changer de fond.
 {
-  let depart = null, minuterie = 0, longue = false;
+  let depart = null, minuterie = 0, longue = false, tire = false;
   ELT.cartes.addEventListener("pointerdown", e => {
+    if (enMouvement) return;
     const el = e.target.closest(".carte");
-    depart = { x: e.clientX, y: e.clientY, el };
-    longue = false;
+    depart = { x: e.clientX, y: e.clientY, el, t: performance.now(), dessus: el && el.dataset.prof === "0" };
+    longue = false; tire = false;
     clearTimeout(minuterie);
-    if (el && el.dataset.id !== "nouvelle") minuterie = setTimeout(() => { longue = true; lever(el); }, 430);
-    else if (!el && !levee) minuterie = setTimeout(() => { longue = true; ouvrirReglages(); }, 520);
+    if (el && depart.dessus && el.dataset.id !== "nouvelle") minuterie = setTimeout(() => { longue = true; lever(el); }, 430);
+    try { ELT.cartes.setPointerCapture(e.pointerId); } catch (_) {}
   });
   ELT.cartes.addEventListener("pointermove", e => {
-    if (depart && Math.hypot(e.clientX - depart.x, e.clientY - depart.y) > 10) { clearTimeout(minuterie); depart = null; }
+    if (!depart) return;
+    const dx = e.clientX - depart.x, dy = e.clientY - depart.y;
+    if (!tire && Math.hypot(dx, dy) > 10) { clearTimeout(minuterie); if (longue) return; tire = true; if (levee) baisser(); }
+    if (tire && depart.el && depart.dessus) {
+      const el = depart.el;
+      el.style.transition = "none";
+      el.style.transform = el._pose.replace(/translate\(([-\d.]+)px,([-\d.]+)px\)/, (m, x, y) => `translate(${+x + dx}px,${+y + dy}px)`) + ` rotate(${dx * 0.025}deg)`;
+    }
   });
   const fin = e => {
     clearTimeout(minuterie);
-    if (!depart || longue) { depart = null; return; }
-    const el = depart.el;
-    depart = null;
+    if (!depart) return;
+    const d = depart; depart = null;
+    const dx = e.clientX - d.x, dy = e.clientY - d.y, el = d.el;
+    if (longue) return;
+    if (tire) {
+      if (el && d.dessus) {
+        el.style.transition = "";
+        const wd = el.offsetWidth;
+        if (dx > wd * 0.22 && Math.abs(dx) > Math.abs(dy)) { el.style.transform = el._pose; feuillePrecedente(); }
+        else if (Math.hypot(dx, dy) > wd * 0.22) feuilleSuivante(el, dx, dy);
+        else el.style.transform = el._pose;
+      } else if (!el && Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.3) changerScene(dx < 0 ? 1 : -1);
+      return;
+    }
     if (levee) {
       const m = levee.querySelector(".marques");
       if (el === levee && m) {
@@ -1310,7 +1391,7 @@ function remplacerMarques(appuye) {
             clearTimeout(minuterieJeter);
             minuterieJeter = setTimeout(() => { confirmeJeter = false; remplacerMarques(false); }, 1800);
           } else {
-            jeterDessin(id).then(remplirPile);
+            jeterDessin(id).then(() => remplirPile());
           }
           return;
         }
@@ -1318,53 +1399,107 @@ function remplacerMarques(appuye) {
       baisser();
       return;
     }
-    if (el) ouvrir(el);
+    if (!el) return;
+    if (d.dessus) ouvrir(el);
+    else { tete = fiches.findIndex(f => f.el === el); placerPile(); }
   };
   ELT.cartes.addEventListener("pointerup", fin);
-  ELT.cartes.addEventListener("pointercancel", () => { clearTimeout(minuterie); depart = null; });
+  ELT.cartes.addEventListener("pointercancel", () => {
+    clearTimeout(minuterie);
+    if (depart && depart.el && depart.dessus) { depart.el.style.transition = ""; depart.el.style.transform = depart.el._pose; }
+    depart = null;
+  });
   ELT.cartes.addEventListener("contextmenu", e => e.preventDefault());
 }
 
-// ---------- choisir le fond : des cartes postales posées devant la pile ----------
-function ouvrirReglages() {
-  if (document.getElementById("reglages")) return;
-  const R = document.createElement("div");
-  R.id = "reglages";
-  const W = innerWidth, H = innerHeight;
-  const lw = Math.max(110, Math.min(250, W / 6.6)), lh = Math.round(lw * H / W);
-  const rang1 = document.createElement("div"), rang2 = document.createElement("div");
-  rang1.className = rang2.className = "rang";
-  const carte = (canvas, pris, angle, faire) => {
-    const d = document.createElement("div");
-    d.className = "choix" + (pris ? " pris" : "");
-    d.style.setProperty("--a", angle + "deg");
-    d.appendChild(canvas);
-    d.addEventListener("pointerup", e => { e.stopPropagation(); faire(d); });
-    d.addEventListener("pointerdown", e => e.stopPropagation());
-    return d;
-  };
-  window.__ambiance.NOMS.forEach((n, i) => {
-    let cv;
-    if (n === "graphite") {
-      cv = document.createElement("canvas"); cv.width = lw * 2; cv.height = lh * 2;
-      const x = cv.getContext("2d");
-      if (ELT.fond.width > 1 && fondFait) x.drawImage(ELT.fond, 0, 0, cv.width, cv.height);
-      else { const g = x.createLinearGradient(0, 0, 0, cv.height); g.addColorStop(0, "#9a9ba0"); g.addColorStop(1, "#5d5e63"); x.fillStyle = g; x.fillRect(0, 0, cv.width, cv.height); }
-    } else {
-      cv = document.createElement("img"); cv.src = AMB.carte(n); cv.alt = "";
+// ---------- changer de fond : glisser sur le décor ; l'ancien s'efface dans le nouveau ----------
+function sourceVisible() {
+  for (const id of ["ciel2", "ciel"]) {
+    const v = document.getElementById(id);
+    if (v.classList.contains("pret") && v.readyState >= 2 && v.videoWidth) return v;
+  }
+  const a = document.getElementById("affiche");
+  if (reglages.scene !== "graphite" && a.complete && a.naturalWidth) return a;
+  if (reglages.scene === "graphite" && ELT.fond.width > 1) return ELT.fond;
+  return null;
+}
+function changerScene(sens) {
+  const N = window.__ambiance.NOMS, i = N.indexOf(reglages.scene);
+  const src = sourceVisible();
+  let inst = document.getElementById("instant");
+  if (inst) inst.remove();
+  if (src) {
+    inst = document.createElement("canvas");
+    inst.id = "instant";
+    inst.width = Math.round(innerWidth * Math.min(DPR, 1.5)); inst.height = Math.round(innerHeight * Math.min(DPR, 1.5));
+    const x = inst.getContext("2d");
+    const sw = src.videoWidth || src.naturalWidth || src.width, sh = src.videoHeight || src.naturalHeight || src.height;
+    const k = Math.max(inst.width / sw, inst.height / sh);
+    try { x.drawImage(src, (inst.width - sw * k) / 2, (inst.height - sh * k) / 2, sw * k, sh * k); } catch (_) {}
+    ELT.cartes.before(inst);
+  }
+  reglages.scene = N[(i + sens + N.length) % N.length];
+  garderReglages();
+  appliquerAmbiance();
+  if (inst) {
+    const aff = document.getElementById("affiche");
+    const partir = () => { inst.style.opacity = 0; setTimeout(() => inst.remove(), 1100); };
+    if (reglages.scene === "graphite" || (aff.complete && aff.naturalWidth)) requestAnimationFrame(() => requestAnimationFrame(partir));
+    else { aff.addEventListener("load", partir, { once: true }); aff.addEventListener("error", partir, { once: true }); setTimeout(partir, 1500); }
+  }
+}
+
+// ---------- la lumière du décor tombe sur les feuilles ----------
+let dernierJour = "";
+{
+  const c = document.createElement("canvas"), CW = 24, CH = 15;
+  c.width = CW; c.height = CH;
+  const x = c.getContext("2d", { willReadFrequently: true });
+  const regarder = () => {
+    if (vue !== "pile" || document.visibilityState === "hidden") return;
+    const src = sourceVisible();
+    let R = 0.96, G = 0.96, B = 0.96, ang = 135, ecart = 0.1, reflet = "rgba(255,255,255,0)";
+    if (src && reglages.scene !== "graphite") {
+      try {
+        x.drawImage(src, 0, 0, CW, CH);
+        const d = x.getImageData(0, 0, CW, CH).data;
+        let sr = 0, sg = 0, sb = 0, sl = 0, lm = 0, cxl = 0, cyl = 0, poids = 0, vr = 0, vg = 0, vb = 0;
+        for (let j = 0; j < CH; j++) for (let i = 0; i < CW; i++) {
+          const o = (j * CW + i) * 4, r = d[o] / 255, g = d[o + 1] / 255, b = d[o + 2] / 255;
+          const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          sr += r * l; sg += g * l; sb += b * l; sl += l; lm += l;
+          const p = l * l * l; cxl += i * p; cyl += j * p; poids += p; vr += r * p; vg += g * p; vb += b * p;
+        }
+        lm /= CW * CH;
+        const m = Math.max(sr, sg, sb) || 1;
+        const tr = sr / m, tg = sg / m, tb = sb / m;           // couleur de la lumière
+        const fort = Math.min(1, 0.42 + lm * 1.15);             // une scène sombre éclaire moins la feuille
+        const teinte = 0.4;
+        R = fort * (1 - teinte * (1 - tr)); G = fort * (1 - teinte * (1 - tg)); B = fort * (1 - teinte * (1 - tb));
+        // d'où vient la lumière, vue depuis la pile
+        const { cx, bas } = taillesPile();
+        const lx = (cxl / (poids || 1) + 0.5) / CW * innerWidth, ly = (cyl / (poids || 1) + 0.5) / CH * innerHeight;
+        ang = Math.atan2(lx - cx, -(ly - (bas - 120))) * 180 / Math.PI;
+        ecart = 0.14 + Math.min(0.14, (0.5 - Math.min(0.5, lm)) * 0.3);
+        const pv = poids || 1; reflet = `rgba(${Math.min(255, vr / pv * 290) | 0},${Math.min(255, vg / pv * 290) | 0},${Math.min(255, vb / pv * 290) | 0},${(0.1 + Math.min(0.12, lm * 0.4)).toFixed(3)})`;
+      } catch (_) {}
     }
-    cv.style.width = lw + "px"; cv.style.height = lh + "px";
-    rang1.appendChild(carte(cv, reglages.scene === n, (hacher(n) - 0.5) * 5, d => {
-      reglages.scene = n; garderReglages();
-      rang1.querySelectorAll(".choix").forEach(c => c.classList.toggle("pris", c === d));
-      appliquerAmbiance();
-    }));
-  });
-  R.append(rang1);
-  const fermer = () => { R.classList.remove("ouvert"); setTimeout(() => R.remove(), 380); };
-  R.addEventListener("pointerup", fermer);
-  document.body.appendChild(R);
-  requestAnimationFrame(() => requestAnimationFrame(() => R.classList.add("ouvert")));
+    cible = [R, G, B];
+    ombrage = `linear-gradient(${ang | 0}deg, rgba(0,0,0,${ecart.toFixed(3)}), rgba(0,0,0,0) 55%, ${reflet})`;
+  };
+  // la couleur de la lumière glisse doucement vers celle du décor : un voile posé sur le papier
+  // (papier × lumière = voile de couleur c à l'opacité a, en mélange normal)
+  let cible = [0.96, 0.96, 0.96], jour = [0, 0, 0], ombrage = "linear-gradient(rgba(0,0,0,0),rgba(0,0,0,0))";
+  const glisser = () => {
+    if (vue !== "pile") return;
+    for (let k = 0; k < 3; k++) jour[k] += (cible[k] - jour[k]) * (jour[k] === 0 ? 1 : 0.12);
+    const pap = PAPIER, a = Math.max(0.02, Math.min(0.85, 1 - Math.min(...jour) * 0.92));
+    const c = [0, 1, 2].map(k => Math.max(0, Math.min(255, (pap[k] * jour[k] - pap[k] * (1 - a)) / a)) | 0);
+    dernierJour = `${ombrage}, linear-gradient(rgba(${c[0]},${c[1]},${c[2]},${a.toFixed(3)}),rgba(${c[0]},${c[1]},${c[2]},${a.toFixed(3)}))`;
+    for (const l of ELT.contenu.querySelectorAll(".lumiere")) l.style.background = dernierJour;
+  };
+  setInterval(regarder, 400);
+  setInterval(glisser, 100);
 }
 
 // ---------- passer de la pile à la feuille, et retour ----------
@@ -1386,6 +1521,8 @@ function envol(src, depuis, vers, fini) {
 function rectCarte(el) {
   const a = +el.dataset.angle || 0, w = el.offsetWidth, h = el.offsetHeight;
   const rc = el.getBoundingClientRect();
+  // la feuille est couchée : on part de ce qu'on en voit à l'écran
+  if (INCLINE) return { x: rc.left, y: rc.top, w: rc.width, h: rc.height, a: 0 };
   // coin haut-gauche de la carte tournée autour de son centre
   const cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2, t = a * Math.PI / 180;
   return { x: cx - (w / 2) * Math.cos(t) + (h / 2) * Math.sin(t), y: cy - (w / 2) * Math.sin(t) - (h / 2) * Math.cos(t), w, h, a };
@@ -1427,8 +1564,7 @@ async function allerPile() {
   vue = "pile";
   ELT.pile.classList.remove("cache");
   appliquerAmbiance();
-  await remplirPile();
-  ELT.cartes.scrollTop = 0;
+  await remplirPile(false, courant && courant.id);
   const el = courant && ELT.contenu.querySelector(`[data-id="${courant.id}"]`);
   const vers = el ? rectCarte(el) : { x: innerWidth / 2, y: innerHeight / 2, w: 1, h: 1, a: 0 };
   if (el) el.style.visibility = "hidden";
