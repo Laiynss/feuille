@@ -22,7 +22,7 @@ canvas{display:block}
 #ciel.pret,#ciel2.pret{opacity:1}
 #affiche.cache-doux,#ciel.cache-doux{opacity:0}
 #cartes{position:absolute;inset:0;overflow:hidden;touch-action:none}
-#cartes .contenu{position:absolute;inset:0;perspective:1600px;perspective-origin:30% -10%}
+#cartes .contenu{position:absolute;inset:0;perspective:1100px;perspective-origin:40% -20%}
 .carte{position:absolute;left:0;top:0;transform-origin:50% 50%;will-change:transform;isolation:isolate;background:var(--papier);box-sizing:border-box;border-bottom:1.5px solid #c9c4b9;
   transition:transform .5s cubic-bezier(.2,.75,.25,1),opacity .5s,box-shadow .5s;
   box-shadow:0 .5px 1px rgba(0,0,0,.35),0 3px 9px rgba(0,0,0,.28),0 14px 34px rgba(0,0,0,.22)}
@@ -1206,7 +1206,7 @@ async function remplirPile(entree = false, dessus = null) {
 function hacher(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return (h >>> 0) / 4294967296; }
 let taillePile = "";
 const VISIBLES = 7;
-const INCLINE = 42;   // les feuilles sont posées à plat devant le décor
+const INCLINE = 58;   // les feuilles sont posées à plat devant le décor
 let viergeFaite = "";
 function disposerPile(entree = false, dessus = null) {
   taillePile = innerWidth + "x" + innerHeight;
