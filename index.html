@@ -1340,7 +1340,8 @@ function disposerPile(entree = false) {
     else {
       // noté au crayon dans le coin, comme sur une vraie feuille
       const note = el("div", "note");
-      note.append(el("span", "nom", f.nom || "sans titre"), el("span", "date", laDate(f.cree || f.modifie)));
+      if (f.nom) note.append(el("span", "nom", f.nom));
+      note.append(el("span", "date", laDate(f.cree || f.modifie)));
       carte.append(note);
     }
     tuile.append(carte);
@@ -1487,8 +1488,20 @@ function fermerFonds() {
     if (o && o.dataset.carnet) { reglages.carnet = o.dataset.carnet; garderReglages(); return disposerPile(); }
     if (d.carte) ouvrir(d.carte);
   });
-  ELT.cartes.addEventListener("pointercancel", () => { clearTimeout(minuterie); depart = null; });
-  ELT.cartes.addEventListener("contextmenu", e => e.preventDefault());
+  // Android interrompt un appui long (pointercancel) pour son propre menu : l'appui long reste un appui long
+  ELT.cartes.addEventListener("pointercancel", () => {
+    if (depart && depart.carte && !bouge && !longue) {
+      const carte = depart.carte;
+      clearTimeout(minuterie);
+      if (carte.dataset.id !== "nouvelle") { longue = true; ouvrirMenu(carte); }
+    } else clearTimeout(minuterie);
+    depart = null;
+  });
+  ELT.cartes.addEventListener("contextmenu", e => {
+    e.preventDefault();
+    const carte = e.target.closest && e.target.closest(".carte");
+    if (carte && carte.dataset.id !== "nouvelle" && !menuOuvert) { clearTimeout(minuterie); longue = true; depart = null; ouvrirMenu(carte); }
+  });
 }
 
 // ---------- changer de fond ; l'ancien s'efface dans le nouveau ----------
