@@ -102,7 +102,11 @@ canvas{display:block}
 #fonds .decor.actif{box-shadow:0 0 0 3px var(--c),0 14px 40px rgba(0,0,0,.6)}
 #fonds .decor.actif img{transform:scale(1.08)}
 img.graphite{background:linear-gradient(160deg,#a3a4a8,#5d5e63)}
-.envol{position:fixed;left:0;top:0;transform-origin:0 0;pointer-events:none;z-index:5;transition:transform .32s cubic-bezier(.3,.6,.2,1)}
+#dessin.vol{z-index:5;background:transparent;pointer-events:none}
+#dessin.vol #feuille{clip-path:inset(0 84px 0 0);box-shadow:0 20px 60px rgba(0,0,0,.45)}
+#dessin.vol #marge{opacity:0}
+#marge{transition:opacity .3s}
+#feuille{transform-origin:0 0;transition:transform .42s cubic-bezier(.25,.75,.2,1)}
 .cache{display:none !important}
 #instant{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;transition:opacity 1s ease}
 </style>
@@ -355,8 +359,11 @@ function sauver(F, x0, y0, x1, y1) {
 // ---------- les outils ----------
 const OUTILS = {
   crayon:    { sorte: "mine", R: 3.2,  Rp: 0.25, bord: 0.45, d0: 0.16, dp: 0.74, flux: 1.3, ec: 0.12, pexp: 1.6 },
-  criterium: { sorte: "mine", R: 0.27, Rp: 0.20, bord: 0,    d0: 0.42, dp: 0.45, flux: 0.95, ec: 0.25, pexp: 1.2 },
-  feutre:    { sorte: "encre", R: 0.30, ec: 0.2 }, // pointe fine qui s'écrase quand on appuie
+  // mine de 0,5 : à peine posée, seule l'arête touche (trait de 0,1 mm) ; appuyée, toute la mine
+  criterium: { sorte: "mine", R: 0.27, Rp: 0.20, bord: 0,    d0: 0.42, dp: 0.45, flux: 0.95, ec: 0.25, pexp: 1.2,
+               l0: 0.09, l1: 0.46, le: 1.25, vite: 0.2 },
+  // feutre de 0,7-0,8 : à peine posé, seul le bout de la pointe touche ; appuyé, elle s'écrase
+  feutre:    { sorte: "encre", ec: 0.2, l0: 0.08, l1: 0.86, le: 1.5, vite: 0.32 },
   mouchoir:  { sorte: "mouchoir", R: 7.0, Rp: 0.15, ec: 0.16, prend: 0.12, rend: 0.07, garde: 0.004, lisse: 0.35 },
   // la mie : sa largeur vient de l'appui (rayon R0 + R1·p^1.5 en mm)
   mie:       { sorte: "mie", R0: 0.45, R1: 5.6, ec: 0.14, leve: 0.86 },
@@ -364,8 +371,22 @@ const OUTILS = {
 };
 const TAILLES_GOMME = [2, 5, 10, 20]; // diamètre en mm
 let tailleGomme = 1;
+// inclinaison du stylet (degrés depuis la verticale, 0 si le stylet ne la donne pas) et vitesse du geste (px/ms)
+let inclinaison = 0, vitesseTrait = 0;
+// largeur d'un trait fin : l'appui, la vitesse (un trait lancé touche moins), et pour le critérium l'inclinaison
+// (couché, le plat de la mine élargit le trait ; droit, c'est l'arête)
+function largeurFine(t, p) {
+  let d = t.l0 + t.l1 * Math.pow(p, t.le);
+  const vmm = vitesseTrait / MM * 1000;                                  // mm/s
+  d *= 1 - t.vite * Math.min(1, Math.max(0, (vmm - 60) / 400));
+  if (t.sorte === "mine" && inclinaison > 0) {
+    const a = inclinaison;
+    d *= a < 45 ? 0.8 + 0.2 * a / 45 : 1 + 1.6 * Math.pow(Math.min(1, (a - 45) / 35), 1.5);
+  }
+  return Math.max(0.45, MM * d / 2);
+}
 const rayon = (t, p) => t.sorte === "gomme" ? Math.max(0.8, TAILLES_GOMME[tailleGomme] / 2 * MM)
-  : t.sorte === "encre" ? Math.max(0.8, MM * t.R * (0.55 + 1.1 * p * p))
+  : t.l1 ? largeurFine(t, p)
   : t.sorte === "mie" ? Math.max(0.8, MM * (t.R0 + t.R1 * Math.pow(p, 1.5)))
   : Math.max(0.8, t.R * MM * (1 - t.Rp / 2 + t.Rp * p));
 
@@ -379,7 +400,7 @@ function touchMine(F, t, cx, cy, r, p, pas) {
   if (x1 < x0) return;
   sauver(F, x0, y0, x1, y1);
   const doux = t.bord > 0 ? t.bord * r : 0.8;
-  const debit = t.flux * (pas / (2 * r)) * (0.15 + 2.2 * Math.pow(p, t.pexp));
+  const debit = t.flux * (pas / Math.max(2 * r, 1.2)) *(0.15 + 2.2 * Math.pow(p, t.pexp));
   const prof = t.d0 + t.dp * p;
   const { G, S, ox } = F;
   // le plat d'une mine couchée n'est pas lisse : ses arêtes laissent des stries dans le sens du trait
@@ -388,7 +409,8 @@ function touchMine(F, t, cx, cy, r, p, pas) {
     const dy = y + 0.5 - cy, row = y * S;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
-      let m = (r - Math.sqrt(dx * dx + dy * dy)) / doux;
+      // pointe fine : couverture de chaque pixel par le disque (un trait de 0,1 mm reste un trait, pas un pointillé)
+      let m = (r - Math.sqrt(dx * dx + dy * dy)) / doux + (strie ? 0 : 0.5);
       if (m <= 0) continue;
       if (m > 1) m = 1;
       const i = row + x, g = G[i];
@@ -535,6 +557,7 @@ function tracer(F, cle, pts, k = 1) {
   const [x, y, p] = pts[0];
   const e = F.echelle || DPR;
   const s = { x: x * e, y: y * e, p, v: 0, reste: 0, tissu: new Float32Array(TS * TS) };
+  inclinaison = 0; vitesseTrait = 0;
   if (OUTILS[cle].sorte !== "mouchoir") s.reste = touche(F, cle, s.x, s.y, p, k, 0, 0, 0);
   for (let i = 1; i < pts.length; i++) avancer(F, s, cle, pts[i][0] * e, pts[i][1] * e, pts[i][2], k);
 }
@@ -931,7 +954,8 @@ F.cv.addEventListener("pointerdown", e => {
   const [x, y] = point(F.cv, e);
   const p = pression(e);
   F.enreg = new Map();
-  trait = { id: e.pointerId, x, y, p, t: e.timeStamp, v: 0, reste: 0, cle: outil, tissu,
+  inclinaison = lireInclinaison(e); vitesseTrait = 0;
+  trait = { id: e.pointerId, x, y, p, t: e.timeStamp, v: 0, reste: 0, cle: outil, tissu, ux: 0, uy: 0,
             tissuAvant: outil === "mouchoir" ? tissu.slice() : null };
   if (OUTILS[outil].sorte !== "mouchoir") trait.reste = touche(F, outil, x, y, p, 1, 0, 0, 0);
   montrer(F);
@@ -942,15 +966,43 @@ F.cv.addEventListener("pointermove", e => {
   const liste = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
   for (const ev of (liste.length ? liste : [e])) {
     const [x, y] = point(F.cv, ev);
-    const dt = Math.max(1, ev.timeStamp - trait.t);
-    trait.v = trait.v * 0.7 + (Math.hypot(x - trait.x, y - trait.y) / dt) * 0.3;
+    const dt = Math.max(1, ev.timeStamp - trait.t), dd = Math.hypot(x - trait.x, y - trait.y);
+    trait.v = trait.v * 0.7 + (dd / dt) * 0.3;
+    if (dd > 0.01) { trait.ux = trait.ux * 0.5 + (x - trait.x) / dd * 0.5; trait.uy = trait.uy * 0.5 + (y - trait.y) / dd * 0.5; }
     trait.t = ev.timeStamp;
+    inclinaison = lireInclinaison(ev); vitesseTrait = trait.v;
     avancer(F, trait, trait.cle, x, y, pression(ev), 1);
   }
   montrer(F);
 });
+// l'inclinaison du stylet, en degrés depuis la verticale (0 si le stylet ne la donne pas)
+function lireInclinaison(e) {
+  if (e.pointerType !== "pen") return 0;
+  if (typeof e.altitudeAngle === "number" && e.altitudeAngle > 0 && e.altitudeAngle < Math.PI / 2 - 0.002) return 90 - e.altitudeAngle * 180 / Math.PI;
+  const tx = Math.tan((e.tiltX || 0) * Math.PI / 180), ty = Math.tan((e.tiltY || 0) * Math.PI / 180);
+  return Math.atan(Math.hypot(tx, ty)) * 180 / Math.PI;
+}
+// un trait lancé : la pointe quitte le papier en bougeant encore, le trait s'effile jusqu'à rien
+function effiler(s) {
+  const t = OUTILS[s.cle];
+  // un trait posé puis levé s'arrête rond ; seul un geste rapide (> ~100 mm/s) laisse une queue
+  const v0 = 100 / 1000 * MM;
+  if (!t.l1 || s.v < v0) return;
+  const n = Math.hypot(s.ux, s.uy);
+  if (n < 0.5) return;
+  const ux = s.ux / n, uy = s.uy / n;
+  const L = Math.min(3.5 * MM, (s.v - v0 * 0.6) * 18);          // ~18 ms de levée
+  const N = Math.max(4, Math.ceil(L / 1.5));
+  const x0 = s.x, y0 = s.y, p0 = s.p;
+  for (let k = 1; k <= N; k++) {
+    const f = k / N;
+    avancer(F, s, s.cle, x0 + ux * L * f, y0 + uy * L * f, p0 * (1 - f * 0.6), Math.max(0.05, 1 - f));
+  }
+}
 function finir(e) {
   if (!trait || e.pointerId !== trait.id) return;
+  effiler(trait);
+  vitesseTrait = 0;
   if (F.enreg && F.enreg.size) { memoriser({ tuiles: F.enreg, tissu: trait.tissuAvant }); modifie = true; }
   trait = null;
   F.enreg = null;
@@ -1618,7 +1670,7 @@ function choisirScene(nom) {
     inst = document.createElement("canvas");
     inst.id = "instant";
     const D = document.getElementById("decor"), w = D.offsetWidth, h = D.offsetHeight;
-    inst.width = Math.round(w * Math.min(DPR, 1.5)); inst.height = Math.round(h * Math.min(DPR, 1.5));
+    inst.width = Math.round(w * DPR); inst.height = Math.round(h * DPR);
     const x = inst.getContext("2d");
     const sw = src.videoWidth || src.naturalWidth || src.width, sh = src.videoHeight || src.naturalHeight || src.height;
     const k = Math.max(inst.width / sw, inst.height / sh);
@@ -1729,25 +1781,33 @@ let dernierJour = "";
 
 // ---------- passer de la pile à la feuille, et retour ----------
 let enMouvement = false;
-function envol(src, depuis, vers, fini) {
-  const im = document.createElement("img");
-  im.className = "envol"; im.src = src;
-  const pose = r => `translate(${r.x}px,${r.y}px) rotate(${r.a || 0}deg) scale(${r.w / 100},${r.h / 100})`;
-  im.style.width = "100px"; im.style.height = "100px";
-  im.style.transform = pose(depuis);
-  document.body.appendChild(im);
-  im.getBoundingClientRect();
-  requestAnimationFrame(() => { im.style.transform = pose(vers); });
+// la feuille elle-même vole entre la grille et l'écran, à sa vraie résolution (pas une vignette agrandie)
+function poseFeuille(r) {
+  const Wd = F.limX / DPR, Hd = F.ch / DPR;
+  return `translate(${r.x}px,${r.y}px) rotate(${r.a || 0}deg) scale(${r.w / Wd},${r.h / Hd})`;
+}
+function voler(depuis, vers, fini) {
+  const cv = F.cv, D = ELT.dessin;
+  D.classList.add("vol");
+  cv.style.transition = "none";
+  cv.style.transform = depuis ? poseFeuille(depuis) : "none";
+  cv.getBoundingClientRect();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    cv.style.transition = "";
+    cv.style.transform = vers ? poseFeuille(vers) : "none";
+  }));
   let fait = false;
-  const fin = () => { if (fait) return; fait = true; fini(); requestAnimationFrame(() => im.remove()); };
-  im.addEventListener("transitionend", fin);
-  setTimeout(fin, 520);
+  const fin = () => {
+    if (fait) return; fait = true;
+    cv.removeEventListener("transitionend", fin);
+    fini();
+  };
+  cv.addEventListener("transitionend", fin);
+  setTimeout(fin, 600);
 }
 function rectCarte(el) {
   const a = +el.dataset.angle || 0, w = el.offsetWidth, h = el.offsetHeight;
   const rc = el.getBoundingClientRect();
-  // la feuille est couchée : on part de ce qu'on en voit à l'écran
-  if (INCLINE) return { x: rc.left, y: rc.top, w: rc.width, h: rc.height, a: 0 };
   // coin haut-gauche de la carte tournée autour de son centre
   const cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2, t = a * Math.PI / 180;
   return { x: cx - (w / 2) * Math.cos(t) + (h / 2) * Math.sin(t), y: cy - (w / 2) * Math.sin(t) - (h / 2) * Math.cos(t), w, h, a };
@@ -1756,7 +1816,6 @@ async function ouvrir(el) {
   if (enMouvement) return;
   enMouvement = true;
   const id = el.dataset.id;
-  const src = el.querySelector(".vue").src;
   const depuis = rectCarte(el);
   F.G.fill(0); F.I.fill(0);
   histo.length = 0;
@@ -1769,15 +1828,17 @@ async function ouvrir(el) {
     courant = { id, cree: rec ? rec.cree : Date.now(), nom: rec && rec.nom || "", carnet: rec && rec.carnet || "", temps: rec && rec.temps || 0 };
     if (rec) { try { await chargerDans(rec, F.G, F.I, F.S); } catch (_) {} }
   }
-  const vers = { x: 0, y: 0, w: rec ? rec.w / (rec.dpr || DPR) : F.limX / DPR, h: rec ? rec.h / (rec.dpr || DPR) : F.ch / DPR, a: 0 };
-  envol(src, depuis, vers, () => {
+  ELT.dessin.classList.remove("cache");
+  dimensionnerTout();
+  composer(F, 0, 0, F.cw - 1, F.ch - 1);
+  dessinerMarge();
+  el.style.visibility = "hidden";
+  voler(depuis, null, () => {
     vue = "feuille";
     AMB.arreter();
-    ELT.dessin.classList.remove("cache");
     ELT.pile.classList.add("cache");
-    dimensionnerTout();
-    composer(F, 0, 0, F.cw - 1, F.ch - 1);
-    dessinerMarge();
+    ELT.dessin.classList.remove("vol");
+    el.style.visibility = "";
     enMouvement = false;
   });
 }
@@ -1785,18 +1846,19 @@ async function allerPile() {
   if (enMouvement) return;
   enMouvement = true;
   if (modifie) await sauver_(); else if (sauveEnCours) await sauveEnCours;
-  const src = await new Promise(res => vignette(F.cv, F.limX, F.ch).then(b => res(URL.createObjectURL(b))));
+  ELT.dessin.classList.add("vol");          // la feuille reste au-dessus pendant que l'accueil revient dessous
   vue = "pile";
   ELT.pile.classList.remove("cache");
   appliquerAmbiance();
   await remplirPile(false, courant && courant.id);
   const el = courant && ELT.contenu.querySelector(`[data-id="${courant.id}"]`);
-  const vers = el ? rectCarte(el) : { x: innerWidth / 2, y: innerHeight / 2, w: 1, h: 1, a: 0 };
   if (el) el.style.visibility = "hidden";
-  ELT.dessin.classList.add("cache");
-  envol(src, { x: 0, y: 0, w: F.limX / DPR, h: F.ch / DPR, a: 0 }, vers, () => {
+  const vers = el ? rectCarte(el) : { x: innerWidth / 2, y: innerHeight / 2, w: 1, h: 1, a: 0 };
+  voler(null, vers, () => {
     if (el) el.style.visibility = "";
-    URL.revokeObjectURL(src);
+    ELT.dessin.classList.add("cache");
+    ELT.dessin.classList.remove("vol");
+    F.cv.style.transition = "none"; F.cv.style.transform = "none";
     enMouvement = false;
   });
 }
