@@ -102,11 +102,23 @@ canvas{display:block}
 #fonds .decor.actif{box-shadow:0 0 0 3px var(--c),0 14px 40px rgba(0,0,0,.6)}
 #fonds .decor.actif img{transform:scale(1.08)}
 img.graphite{background:linear-gradient(160deg,#a3a4a8,#5d5e63)}
-#dessin.vol{z-index:5;background:transparent;pointer-events:none}
-#dessin.vol #feuille{clip-path:inset(0 84px 0 0);box-shadow:0 20px 60px rgba(0,0,0,.45)}
-#dessin.vol #marge{opacity:0}
-#marge{transition:opacity .3s}
-#feuille{transform-origin:0 0;transition:transform .42s cubic-bezier(.25,.75,.2,1)}
+#dessin{background:#18181c;transition:opacity .38s ease}
+#dessin #feuille{background:#18181c}
+#dessin.dessus{z-index:5}
+#dessin.vol{opacity:0;pointer-events:none}
+#envol{position:fixed;left:0;top:0;z-index:7;transform-origin:0 0;pointer-events:none;box-shadow:0 3px 6px rgba(0,0,0,.3),0 22px 60px rgba(0,0,0,.5);transition:transform .42s cubic-bezier(.25,.75,.2,1)}
+.menu .rang{display:flex;align-items:baseline;gap:6px 26px;flex-wrap:wrap;padding:6px 0 4px}
+.menu .rang+.rang{background:linear-gradient(to right,rgba(50,52,58,0),rgba(50,52,58,.2) 8%,rgba(50,52,58,.14) 70%,rgba(50,52,58,0)) top/100% 1px no-repeat}
+.menu .opt{position:relative;font:inherit;font-size:36px;line-height:1.1;color:rgba(41,41,47,.42);background:none;border:0;padding:4px 1px 8px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.menu .opt.pris{color:#1d1d22}
+.menu .opt.pris .souligne path{stroke:#2b2b31;stroke-width:2.4;opacity:.75}
+.menu .opt.non{color:rgba(41,41,47,.18);text-decoration:line-through;cursor:default}
+.menu .unite,.menu .fois{font-size:28px;opacity:.55}
+.menu .saisie.px{width:3.4em;font-size:34px;margin:0;-moz-appearance:textfield}
+.menu .saisie.px::-webkit-inner-spin-button{display:none}
+.menu .taille{font-size:31px;line-height:1.1;color:rgba(41,41,47,.72);padding:8px 0 2px;white-space:nowrap}
+.menu .choix.commencer{font-size:42px;color:#141418;padding-top:10px}
+.menu .choix.commencer:disabled{opacity:.25}
 .cache{display:none !important}
 #instant{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;transition:opacity 1s ease}
 </style>
@@ -253,7 +265,8 @@ const GR = new Float32Array(512 * 512);
     return out;
   }
   // le grain d'un papier à dessin : des creux de 0,2 à 0,6 mm, doux, rien au pixel près
-  const k = Math.max(1, MM / 9.6);
+  // fait pour 9,6 px/mm ; une feuille plus dense le reprend agrandi (grainPour)
+  const k = 1;
   const n = c => Math.max(8, Math.round(c / k / 8) * 8);
   const parts = [
     [couche(n(232), n(232)), 0.46], [couche(n(136), n(136)), 0.26], [couche(n(56), n(56)), 0.10],
@@ -264,6 +277,24 @@ const GR = new Float32Array(512 * 512);
   for (let r = 0; r < tri.length; r++) GR[tri[r]] = r / (tri.length - 1);
 })();
 const grainEn = (x, y) => GR[((y & 511) << 9) | (x & 511)];
+// le même grain, en mm, pour une feuille de densité mm (px par mm) : même taille de creux quelle que soit la résolution
+const grains = new Map();
+function grainPour(mm) {
+  const T = Math.max(64, Math.round(512 * mm / 9.6));
+  if (T === 512) return { T, R: GR };
+  if (grains.has(T)) return grains.get(T);
+  const R = new Float32Array(T * T), f = 512 / T;
+  for (let y = 0; y < T; y++) {
+    const sy = y * f, y0 = sy | 0, ty = sy - y0, a = (y0 & 511) << 9, b = ((y0 + 1) & 511) << 9;
+    for (let x = 0; x < T; x++) {
+      const sx = x * f, x0 = sx | 0, tx = sx - x0, x1 = (x0 + 1) & 511, xa = x0 & 511;
+      R[y * T + x] = (GR[a + xa] * (1 - tx) + GR[a + x1] * tx) * (1 - ty) + (GR[b + xa] * (1 - tx) + GR[b + x1] * tx) * ty;
+    }
+  }
+  const g = { T, R };
+  grains.clear(); grains.set(T, g);
+  return g;
+}
 
 // ---------- couleurs ----------
 const PAPIER = [244, 243, 239], MINE = [50, 52, 58], ENCRE = [19, 19, 23];
@@ -271,41 +302,45 @@ const GMAX = 3, LUT_N = 2048, LUT_K = LUT_N / GMAX, LUT = new Float32Array(LUT_N
 for (let i = 0; i <= LUT_N; i++) LUT[i] = 0.86 * (1 - Math.exp(-(i / LUT_K) * 0.95));
 
 // ---------- une feuille (graphite + encre + affichage) ----------
+// S = largeur d'une ligne en mémoire, H = nombre de lignes ; mm = pixels de cette feuille par millimètre
 function creerFeuille(cv, taille) {
+  const g = grainPour(MM);
   return {
     cv, ctx: cv.getContext("2d", { desynchronized: true, alpha: false }),
-    S: taille, G: new Float32Array(taille * taille), I: new Float32Array(taille * taille),
+    S: taille, H: taille, G: new Float32Array(taille * taille), I: new Float32Array(taille * taille),
     cw: 0, ch: 0, img: null, d32: null, ox: 0, limX: 1e9,
+    mm: MM, gT: g.T, gR: g.R, TR: tailleTissu(MM), TS: 2 * tailleTissu(MM) + 1,
     sx0: Infinity, sy0: Infinity, sx1: -1, sy1: -1, enreg: null,
   };
 }
 function assurer(F, n) {
   if (n <= F.S) return;
   const N = n + 64, G2 = new Float32Array(N * N), I2 = new Float32Array(N * N);
-  for (let y = 0; y < F.S; y++) {
+  for (let y = 0; y < F.H; y++) {
     G2.set(F.G.subarray(y * F.S, y * F.S + F.S), y * N);
     I2.set(F.I.subarray(y * F.S, y * F.S + F.S), y * N);
   }
-  F.S = N; F.G = G2; F.I = I2;
+  F.S = N; F.H = N; F.G = G2; F.I = I2;
 }
 function sale(F, x0, y0, x1, y1) {
   if (x0 < F.sx0) F.sx0 = x0; if (y0 < F.sy0) F.sy0 = y0;
   if (x1 > F.sx1) F.sx1 = x1; if (y1 > F.sy1) F.sy1 = y1;
+  // ce qui a changé depuis la dernière sauvegarde
+  const Z = F.aSauver;
+  if (Z) { if (x0 < Z[0]) Z[0] = x0; if (y0 < Z[1]) Z[1] = y0; if (x1 > Z[2]) Z[2] = x1; if (y1 > Z[3]) Z[3] = y1; }
 }
 function boite(F, cx, cy, r) {
   return [Math.max(0, Math.floor(cx - r - 1)), Math.max(0, Math.floor(cy - r - 1)),
-          Math.min(F.S - 1, F.limX - 1, Math.ceil(cx + r + 1)), Math.min(F.S - 1, Math.ceil(cy + r + 1))];
+          Math.min(F.S - 1, F.limX - 1, Math.ceil(cx + r + 1)), Math.min(F.H - 1, Math.ceil(cy + r + 1))];
 }
-function composer(F, x0, y0, x1, y1) {
-  x0 = Math.max(0, x0); y0 = Math.max(0, y0);
-  x1 = Math.min(F.cw - 1, x1, F.S - 1); y1 = Math.min(F.ch - 1, y1, F.S - 1);
-  if (x1 < x0 || y1 < y0) return;
-  const { G, I, S, d32, cw, ox } = F;
+// les couleurs d'un rectangle de feuille, écrites dans d32 (ligne de largeur pas, origine dx, dy) ; yb = première ligne en mémoire
+function couleurs(F, x0, y0, x1, y1, d32, pas, dx, dy, yb = 0) {
+  const { G, I, S, ox, gT, gR } = F;
   for (let y = y0; y <= y1; y++) {
-    const row = y * S, out = y * cw;
+    const row = (y - yb) * S, out = (y - dy) * pas - dx, gy = (y % gT) * gT;
     for (let x = x0; x <= x1; x++) {
       const i = row + x;
-      const pa = 1 - 0.028 * (1 - grainEn(x + ox, y));
+      const pa = 1 - 0.028 * (1 - gR[gy + (x + ox) % gT]);
       let r = PAPIER[0] * pa, g = PAPIER[1] * pa, b = PAPIER[2] * pa;
       const gm = G[i];
       if (gm > 0.0005) {
@@ -318,6 +353,13 @@ function composer(F, x0, y0, x1, y1) {
       d32[out + x] = 0xff000000 | ((b | 0) << 16) | ((g | 0) << 8) | (r | 0);
     }
   }
+}
+function composer(F, x0, y0, x1, y1) {
+  if (F.tuiles) return composerTuiles(F, x0, y0, x1, y1);
+  x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+  x1 = Math.min(F.cw - 1, x1, F.S - 1); y1 = Math.min(F.ch - 1, y1, F.H - 1);
+  if (x1 < x0 || y1 < y0) return;
+  couleurs(F, x0, y0, x1, y1, F.d32, F.cw, 0, 0);
   F.ctx.putImageData(F.img, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
 }
 function montrer(F) {
@@ -333,6 +375,150 @@ function dimensionner(F, w, h) {
   F.d32 = new Uint32Array(F.img.data.buffer);
 }
 
+// ---------- la feuille qu'on dessine : sa taille et sa résolution à elle, l'écran la regarde ----------
+// gardée en morceaux d'image (une image géante dépasse ce qu'un écran de tablette sait afficher d'un coup)
+const TUILE = 512;
+const TABLE = "#18181c";                 // autour de la feuille
+const V = { z: 1, x: 0, y: 0, zFit: 1 }; // écran = V.x + feuille × V.z (pixels de l'écran)
+let SANS_ECRAN = false;                  // banc d'essai : pas d'affichage
+function tailleTissu(mm) { return Math.ceil(1.12 * 7.0 * mm) + 2; }
+function preparerFeuille(W, H, mm) {
+  F.G = F.I = null; F.tuiles = null; F.niveaux = null; F.sauvegarde = null;
+  F.S = W; F.H = H; F.limX = W; F.cw = W; F.ch = H; F.ox = 0; F.mm = mm;
+  F.G = new Float32Array(W * H); F.I = new Float32Array(W * H);
+  const g = grainPour(mm); F.gT = g.T; F.gR = g.R;
+  F.TR = tailleTissu(mm); F.TS = 2 * F.TR + 1;
+  F.sx0 = F.sy0 = Infinity; F.sx1 = F.sy1 = -1;
+  F.aSauver = [Infinity, Infinity, -1, -1];
+  F.tuiles = creerTuiles(W, H, false);
+  // la feuille réduite (1/2, 1/4, 1/8…), en morceaux elle aussi : vue de loin, on affiche peu de pixels
+  F.niveaux = [{ k: 1, tuiles: F.tuiles }];
+  if (!SANS_ECRAN) for (let k = 2; Math.max(W, H) / k >= 256; k *= 2)
+    F.niveaux.push({ k, tuiles: creerTuiles(Math.ceil(W / k), Math.ceil(H / k), true) });
+}
+function creerTuiles(W, H, papier) {
+  const L = [];
+  for (let ty = 0; ty < H; ty += TUILE) for (let tx = 0; tx < W; tx += TUILE) {
+    const t = { x: tx, y: ty, w: Math.min(TUILE, W - tx), h: Math.min(TUILE, H - ty), cv: null, ctx: null };
+    if (!SANS_ECRAN) {
+      t.cv = document.createElement("canvas"); t.cv.width = t.w; t.cv.height = t.h;
+      t.ctx = t.cv.getContext("2d", { alpha: false });
+      // le dernier pixel d'une réduction peut déborder de la feuille : il reste papier
+      if (papier) { t.ctx.fillStyle = `rgb(${PAPIER.join(",")})`; t.ctx.fillRect(0, 0, t.w, t.h); t.ctx.imageSmoothingEnabled = true; t.ctx.imageSmoothingQuality = "high"; }
+    }
+    L.push(t);
+  }
+  return L;
+}
+function lacherFeuille() {
+  F.G = F.I = null; F.tuiles = null; F.niveaux = null; F.sauvegarde = null;
+  F.S = F.H = 0;
+}
+// ce qui a changé sur la feuille depuis la dernière mise à jour de chaque réduction ; une réduction ne se refait
+// qu'au moment où on la regarde
+function majNiveaux(x0, y0, x1, y1) {
+  for (const n of F.niveaux) {
+    if (n.k === 1) continue;
+    const s = n.sale || (n.sale = [Infinity, Infinity, -1, -1]);
+    if (x0 < s[0]) s[0] = x0; if (y0 < s[1]) s[1] = y0; if (x1 > s[2]) s[2] = x1; if (y1 > s[3]) s[3] = y1;
+  }
+}
+// recopie la partie changée dans la réduction i, depuis la réduction juste au-dessus : une moitié exacte
+// (le filtre simple, à 2 pour 1, fait exactement la moyenne de 4 pixels)
+function rafraichirNiveau(i) {
+  const n = F.niveaux[i], s = n.sale;
+  if (i === 0 || !s || s[2] < s[0]) return;
+  n.sale = null;
+  rafraichirNiveau(i - 1);
+  const src = F.niveaux[i - 1], ks = src.k, k = n.k, [x0, y0, x1, y1] = s;
+  const X0 = Math.floor(x0 / k) * k, Y0 = Math.floor(y0 / k) * k, X1 = Math.min(F.S, Math.ceil((x1 + 1) / k) * k), Y1 = Math.min(F.H, Math.ceil((y1 + 1) / k) * k);
+  for (const d of n.tuiles) {
+    const A = Math.max(X0, d.x * k), B = Math.max(Y0, d.y * k), C = Math.min(X1, (d.x + d.w) * k), D = Math.min(Y1, (d.y + d.h) * k);
+    if (C <= A || D <= B) continue;
+    d.ctx.imageSmoothingQuality = "low";
+    for (const t of src.tuiles) {
+      const a = Math.max(A, t.x * ks), b = Math.max(B, t.y * ks), c = Math.min(C, (t.x + t.w) * ks), e = Math.min(D, (t.y + t.h) * ks);
+      if (c <= a || e <= b) continue;
+      d.ctx.drawImage(t.cv, a / ks - t.x, b / ks - t.y, (c - a) / ks, (e - b) / ks, a / k - d.x, b / k - d.y, (c - a) / k, (e - b) / k);
+    }
+  }
+}
+function composerTuiles(F, x0, y0, x1, y1) {
+  x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(F.S - 1, x1); y1 = Math.min(F.H - 1, y1);
+  if (x1 < x0 || y1 < y0 || SANS_ECRAN) return;
+  for (const t of F.tuiles) {
+    const a = Math.max(x0, t.x), b = Math.max(y0, t.y), c = Math.min(x1, t.x + t.w - 1), d = Math.min(y1, t.y + t.h - 1);
+    if (c < a || d < b) continue;
+    const w = c - a + 1, h = d - b + 1, img = t.ctx.createImageData(w, h);
+    couleurs(F, a, b, c, d, new Uint32Array(img.data.buffer), w, a, b);
+    t.ctx.putImageData(img, a - t.x, b - t.y);
+  }
+  majNiveaux(x0, y0, x1, y1);
+  // et l'écran, à cet endroit : une fois par image affichée, pas à chaque mouvement du stylet
+  const r = [Math.floor(V.x + x0 * V.z) - 2, Math.floor(V.y + y0 * V.z) - 2, Math.ceil(V.x + (x1 + 1) * V.z) + 2, Math.ceil(V.y + (y1 + 1) * V.z) + 2];
+  if (!ecranSale) {
+    ecranSale = r;
+    requestAnimationFrame(() => { const e = ecranSale; ecranSale = null; if (e) peindre(e); });
+  } else {
+    ecranSale[0] = Math.min(ecranSale[0], r[0]); ecranSale[1] = Math.min(ecranSale[1], r[1]);
+    ecranSale[2] = Math.max(ecranSale[2], r[2]); ecranSale[3] = Math.max(ecranSale[3], r[3]);
+  }
+}
+let ecranSale = null;
+// dessine la vue (toute, ou le rectangle r de l'écran)
+function peindre(r) {
+  if (SANS_ECRAN || !F.tuiles) return;
+  const c = F.ctx, w = F.cv.width, h = F.cv.height;
+  const X0 = V.x, Y0 = V.y, X1 = V.x + F.S * V.z, Y1 = V.y + F.H * V.z;
+  const R = r ? [Math.max(0, r[0]), Math.max(0, r[1]), Math.min(w, r[2]), Math.min(h, r[3])] : [0, 0, w, h];
+  if (R[2] <= R[0] || R[3] <= R[1]) return;
+  c.save();
+  if (r) { c.beginPath(); c.rect(R[0], R[1], R[2] - R[0], R[3] - R[1]); c.clip(); }
+  // autour de la feuille : la table, et l'ombre de la feuille posée dessus
+  if (R[0] < X0 || R[1] < Y0 || R[2] > X1 || R[3] > Y1) {
+    c.fillStyle = TABLE; c.fillRect(R[0], R[1], R[2] - R[0], R[3] - R[1]);
+    c.shadowColor = "rgba(0,0,0,.55)"; c.shadowBlur = 34 * DPR; c.shadowOffsetY = 10 * DPR;
+    c.fillStyle = `rgb(${PAPIER.join(",")})`;
+    c.fillRect(Math.round(X0), Math.round(Y0), Math.round(X1) - Math.round(X0), Math.round(Y1) - Math.round(Y0));
+    c.shadowColor = "transparent"; c.shadowBlur = 0; c.shadowOffsetY = 0;
+  }
+  c.imageSmoothingEnabled = true; c.imageSmoothingQuality = "high";
+  // la réduction la plus petite qui garde au moins un de ses pixels par pixel d'écran
+  let ni = 0;
+  F.niveaux.forEach((m, i) => { if (m.k <= 1 / V.z) ni = i; });
+  rafraichirNiveau(ni);
+  const n = F.niveaux[ni];
+  const e = n.k * V.z;
+  // réduire de moins de moitié n'a pas besoin du filtre fin (il prépare chaque morceau la première fois qu'on le voit)
+  c.imageSmoothingQuality = e < 1 ? "low" : "high";
+  for (const t of n.tuiles) {
+    // bords arrondis au pixel, communs aux morceaux voisins : pas de couture
+    const a = Math.round(V.x + t.x * e), b = Math.round(V.y + t.y * e);
+    const a2 = Math.round(V.x + (t.x + t.w) * e), b2 = Math.round(V.y + (t.y + t.h) * e);
+    if (a2 <= R[0] || a >= R[2] || b2 <= R[1] || b >= R[3]) continue;
+    c.drawImage(t.cv, a, b, a2 - a, b2 - b);
+  }
+  c.restore();
+}
+// la zone où l'on voit la feuille (à gauche de la marge), en pixels d'écran
+const largeurVue = () => F.cv.width - Math.round(MARGE * DPR);
+function ajuster() {
+  const vw = largeurVue(), vh = F.cv.height;
+  if (!F.S || vw <= 0 || vh <= 0) return;
+  // une feuille aux proportions de l'écran le remplit, comme avant ; les autres sont posées avec un peu de table autour
+  const pareil = Math.abs(F.S / F.H - vw / vh) < 0.01;
+  const pad = pareil ? 0 : Math.round(26 * DPR);
+  const z = Math.min((vw - 2 * pad) / F.S, (vh - 2 * pad) / F.H);
+  V.z = V.zFit = z; V.x = (vw - F.S * z) / 2; V.y = (vh - F.H * z) / 2;
+}
+function borner() {
+  const vw = largeurVue(), vh = F.cv.height, sw = F.S * V.z, sh = F.H * V.z;
+  const zMax = Math.max(V.zFit * 1.01, 8 * DPR / 2.5);
+  if (V.z > zMax) V.z = zMax;
+  V.x = Math.min(Math.max(0, vw - sw) + vw * 0.25, Math.max(Math.min(0, vw - sw) - vw * 0.25, V.x));
+  V.y = Math.min(Math.max(0, vh - sh) + vh * 0.25, Math.max(Math.min(0, vh - sh) - vh * 0.25, V.y));
+}
+
 // ---------- retour en arrière : on garde les morceaux de feuille avant chaque trait ----------
 const TU = 64;
 function sauver(F, x0, y0, x1, y1) {
@@ -343,7 +529,7 @@ function sauver(F, x0, y0, x1, y1) {
     for (let tx = (x0 / TU) | 0; tx <= ((x1 / TU) | 0); tx++) {
       const k = ty * 65536 + tx;
       if (E.has(k)) continue;
-      const bx = tx * TU, by = ty * TU, w = Math.min(TU, S - bx), h = Math.min(TU, S - by);
+      const bx = tx * TU, by = ty * TU, w = Math.min(TU, S - bx), h = Math.min(TU, F.H - by);
       if (w <= 0 || h <= 0) continue;
       const g = new Float32Array(w * h), i = new Float32Array(w * h);
       for (let y = 0; y < h; y++) {
@@ -375,24 +561,24 @@ let tailleGomme = 1;
 let inclinaison = 0, vitesseTrait = 0;
 // largeur d'un trait fin : l'appui, la vitesse (un trait lancé touche moins), et pour le critérium l'inclinaison
 // (couché, le plat de la mine élargit le trait ; droit, c'est l'arête)
-function largeurFine(t, p) {
+function largeurFine(t, p, mm) {
   let d = t.l0 + t.l1 * Math.pow(p, t.le);
-  const vmm = vitesseTrait / MM * 1000;                                  // mm/s
+  const vmm = vitesseTrait / mm * 1000;                                  // mm/s
   d *= 1 - t.vite * Math.min(1, Math.max(0, (vmm - 60) / 400));
   if (t.sorte === "mine" && inclinaison > 0) {
     const a = inclinaison;
     d *= a < 45 ? 0.8 + 0.2 * a / 45 : 1 + 1.6 * Math.pow(Math.min(1, (a - 45) / 35), 1.5);
   }
-  return Math.max(0.45, MM * d / 2);
+  return Math.max(0.45, mm * d / 2);
 }
-const rayon = (t, p) => t.sorte === "gomme" ? Math.max(0.8, TAILLES_GOMME[tailleGomme] / 2 * MM)
-  : t.l1 ? largeurFine(t, p)
-  : t.sorte === "mie" ? Math.max(0.8, MM * (t.R0 + t.R1 * Math.pow(p, 1.5)))
-  : Math.max(0.8, t.R * MM * (1 - t.Rp / 2 + t.Rp * p));
+// rayon de la pointe en pixels d'une feuille de densité mm (px par mm)
+const rayon = (t, p, mm) => t.sorte === "gomme" ? Math.max(0.8, TAILLES_GOMME[tailleGomme] / 2 * mm)
+  : t.l1 ? largeurFine(t, p, mm)
+  : t.sorte === "mie" ? Math.max(0.8, mm * (t.R0 + t.R1 * Math.pow(p, 1.5)))
+  : Math.max(0.8, t.R * mm * (1 - t.Rp / 2 + t.Rp * p));
 
-// le mouchoir : un carré de tissu qui porte son graphite, collé sous le doigt
-const TR = Math.ceil(1.12 * OUTILS.mouchoir.R * MM) + 2, TS = 2 * TR + 1;
-let tissu = new Float32Array(TS * TS); // reste sale d'un trait à l'autre
+// le mouchoir : un carré de tissu qui porte son graphite, collé sous le doigt (taille : F.TS, selon la densité)
+let tissu = new Float32Array(1); // reste sale d'un trait à l'autre
 const espacement = (t, r) => Math.max(0.5, t.ec * 2 * r);
 
 function touchMine(F, t, cx, cy, r, p, pas) {
@@ -402,11 +588,11 @@ function touchMine(F, t, cx, cy, r, p, pas) {
   const doux = t.bord > 0 ? t.bord * r : 0.8;
   const debit = t.flux * (pas / Math.max(2 * r, 1.2)) *(0.15 + 2.2 * Math.pow(p, t.pexp));
   const prof = t.d0 + t.dp * p;
-  const { G, S, ox } = F;
+  const { G, S, ox, gT, gR } = F;
   // le plat d'une mine couchée n'est pas lisse : ses arêtes laissent des stries dans le sens du trait
-  const strie = t.bord > 0, icx = Math.round(cx), icy = Math.round(cy);
+  const strie = t.bord > 0, icx = Math.round(cx), icy = Math.round(cy), ks = 4.8 / F.mm;
   for (let y = y0; y <= y1; y++) {
-    const dy = y + 0.5 - cy, row = y * S;
+    const dy = y + 0.5 - cy, row = y * S, gy = (y % gT) * gT;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
       // pointe fine : couverture de chaque pixel par le disque (un trait de 0,1 mm reste un trait, pas un pointillé)
@@ -416,10 +602,10 @@ function touchMine(F, t, cx, cy, r, p, pas) {
       const i = row + x, g = G[i];
       const pr = prof + 0.28 * (g < 2 ? g : 2) / 2;
       // contact doux : la mine touche les bosses, puis descend dans les creux quand on appuie
-      let c = (grainEn(x + ox, y) - (1 - pr)) / 0.7 + 0.25;
+      let c = (gR[gy + (x + ox) % gT] - (1 - pr)) / 0.7 + 0.25;
       c = c < 0 ? 0 : c > 1 ? 1 : c;
       c = 0.3 + 0.7 * c * c * (3 - 2 * c);
-      const lt = strie ? GR[((((y - icy) >> 1) + 300 & 511) << 9) | (((x - icx) >> 1) + 300 & 511)] : 0;
+      const lt = strie ? GR[((Math.floor((y - icy) * ks) + 300 & 511) << 9) | (Math.floor((x - icx) * ks) + 300 & 511)] : 0;
       const mine = strie ? 0.25 + 2.25 * lt * lt : 1;
       G[i] = g + debit * m * c * mine * (1 - g / GMAX);
     }
@@ -430,12 +616,12 @@ function touchEncre(F, cx, cy, r, sec) {
   const [x0, y0, x1, y1] = boite(F, cx, cy, r + 1);
   if (x1 < x0) return;
   sauver(F, x0, y0, x1, y1);
-  const { I, S, ox } = F;
+  const { I, S, ox, gT, gR } = F;
   for (let y = y0; y <= y1; y++) {
-    const dy = y + 0.5 - cy, row = y * S;
+    const dy = y + 0.5 - cy, row = y * S, gy = (y % gT) * gT;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
-      const h = grainEn(x + ox, y);
+      const h = gR[gy + (x + ox) % gT];
       let m = (r - Math.sqrt(dx * dx + dy * dy)) / 0.7 + 0.5 + (h - 0.5) * 0.55;
       if (m <= 0) continue;
       if (m > 1) m = 1;
@@ -454,11 +640,9 @@ function touchMie(F, t, cx, cy, r, p, pas) {
   const T = t.leve * (0.7 + 0.3 * p);
   const n = 1.3 * pas / (2 * r);
   const doux = 0.4 * r + 1;
-  const { G, S, ox } = F;
-  // le plat d'une mine couchée n'est pas lisse : ses arêtes laissent des stries dans le sens du trait
-  const strie = t.bord > 0, icx = Math.round(cx), icy = Math.round(cy);
+  const { G, S, ox, gT, gR } = F;
   for (let y = y0; y <= y1; y++) {
-    const dy = y + 0.5 - cy, row = y * S;
+    const dy = y + 0.5 - cy, row = y * S, gy = (y % gT) * gT;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
       let m = (r - Math.sqrt(dx * dx + dy * dy)) / doux;
@@ -467,7 +651,7 @@ function touchMie(F, t, cx, cy, r, p, pas) {
       const i = row + x;
       if (G[i] < 0.0005) continue;
       // la mie prend sur les bosses du papier, le creux garde un voile
-      let l = T * m * (0.8 + 0.4 * grainEn(x + ox, y));
+      let l = T * m * (0.8 + 0.4 * gR[gy + (x + ox) % gT]);
       if (l > 0.97) l = 0.97;
       G[i] *= Math.pow(1 - l, n);
     }
@@ -494,15 +678,15 @@ function touchGomme(F, cx, cy, r) {
 }
 function touchMouchoir(F, t, cx, cy, r, p, st) {
   let [x0, y0, x1, y1] = boite(F, cx, cy, r);
-  x0 = Math.max(1, x0); y0 = Math.max(1, y0); x1 = Math.min(F.S - 2, x1); y1 = Math.min(F.S - 2, y1);
-  if (x1 < x0) return;
+  x0 = Math.max(1, x0); y0 = Math.max(1, y0); x1 = Math.min(F.S - 2, x1); y1 = Math.min(F.H - 2, y1);
+  if (x1 < x0 || y1 < y0) return;
   sauver(F, x0, y0, x1, y1);
   const T = st && st.tissu ? st.tissu : (tissu);
-  const { G, S, ox } = F;
+  const { G, S, ox, gT, gR, TR, TS } = F;
   const s0 = 0.35 + 0.65 * p;
-  const icx = Math.round(cx), icy = Math.round(cy);
+  const icx = Math.round(cx), icy = Math.round(cy), kt = 5 * 9.6 / F.mm;
   for (let y = y0; y <= y1; y++) {
-    const dy = y + 0.5 - cy, row = y * S, v = y - icy + TR;
+    const dy = y + 0.5 - cy, row = y * S, v = y - icy + TR, gy = (y % gT) * gT;
     if (v < 0 || v >= TS) continue;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx, q = (dx * dx + dy * dy) / (r * r);
@@ -511,8 +695,8 @@ function touchMouchoir(F, t, cx, cy, r, p, st) {
       if (u < 0 || u >= TS) continue;
       const s = s0 * (1 - q);
       // la trame du tissu (elle se déplace avec le doigt : elle laisse des traînées dans le sens du geste)
-      const fb = GR[(((v * 5) & 511) << 9) | ((u * 5 + 131) & 511)];
-      const gr = grainEn(x + ox, y);
+      const fb = GR[((((v * kt) | 0) & 511) << 9) | ((((u * kt) | 0) + 131) & 511)];
+      const gr = gR[gy + (x + ox) % gT];
       const i = row + x, g = G[i], ti = v * TS + u, tv = T[ti];
       const prend = t.prend * s * (0.4 + 1.2 * fb) * (0.7 + 0.6 * gr) * g;
       const rend = t.rend * s * (0.4 + 1.2 * fb) * tv;
@@ -527,10 +711,10 @@ function touchMouchoir(F, t, cx, cy, r, p, st) {
 // un contact de l'outil ; renvoie l'espacement jusqu'au suivant
 function touche(F, cle, x, y, p, k, ddx, ddy, vitesse, st) {
   const t = OUTILS[cle];
-  const r = rayon(t, p) * k;
+  const r = rayon(t, p, F.mm) * k;
   const pas = espacement(t, r);
   if (t.sorte === "mine") touchMine(F, t, x, y, r, p, pas);
-  else if (t.sorte === "encre") touchEncre(F, x, y, r, Math.min(0.25, Math.max(0, (vitesse / MM - 0.8) / 2)));
+  else if (t.sorte === "encre") touchEncre(F, x, y, r, Math.min(0.25, Math.max(0, (vitesse / F.mm - 0.8) / 2)));
   else if (t.sorte === "mie") touchMie(F, t, x, y, r, p, pas);
   else if (t.sorte === "gomme") touchGomme(F, x, y, r);
   else touchMouchoir(F, t, x, y, r, p, st);
@@ -545,7 +729,7 @@ function avancer(F, s, cle, nx, ny, np, k) {
   let suivant = s.reste, garde = 0;
   while (suivant <= dist && garde++ < 4000) {
     const f = suivant / dist, p = s.p + (np - s.p) * f;
-    const pas = espacement(t, rayon(t, p) * k);
+    const pas = espacement(t, rayon(t, p, F.mm) * k);
     touche(F, cle, s.x + dx * f, s.y + dy * f, p, k, ux * pas, uy * pas, s.v, s);
     suivant += pas;
   }
@@ -556,7 +740,7 @@ function avancer(F, s, cle, nx, ny, np, k) {
 function tracer(F, cle, pts, k = 1) {
   const [x, y, p] = pts[0];
   const e = F.echelle || DPR;
-  const s = { x: x * e, y: y * e, p, v: 0, reste: 0, tissu: new Float32Array(TS * TS) };
+  const s = { x: x * e, y: y * e, p, v: 0, reste: 0, tissu: new Float32Array(F.TS * F.TS) };
   inclinaison = 0; vitesseTrait = 0;
   if (OUTILS[cle].sorte !== "mouchoir") s.reste = touche(F, cle, s.x, s.y, p, k, 0, 0, 0);
   for (let i = 1; i < pts.length; i++) avancer(F, s, cle, pts[i][0] * e, pts[i][1] * e, pts[i][2], k);
@@ -756,7 +940,8 @@ const POSE = { crayon: -2.55, criterium: -2.62, feutre: -2.5, mouchoir: -0.12, m
 // ======================================================================
 function feuilleLibre(wCss, hCss, ech = DPR) {
   const S = Math.ceil(Math.max(wCss, hCss) * ech) + 4;
-  return { S, G: new Float32Array(S * S), I: new Float32Array(S * S), cw: 0, ch: 0, ox: 0, limX: 1e9, echelle: ech,
+  return { S, H: S, G: new Float32Array(S * S), I: new Float32Array(S * S), cw: 0, ch: 0, ox: 0, limX: 1e9, echelle: ech,
+           mm: MM, gT: 512, gR: GR, TR: tailleTissu(MM), TS: 2 * tailleTissu(MM) + 1,
            sx0: Infinity, sy0: Infinity, sx1: -1, sy1: -1, enreg: null, wCss, hCss };
 }
 function versTransparent(T) {
@@ -783,8 +968,9 @@ function versTransparent(T) {
 // ======================================================================
 // la feuille principale et la marge
 // ======================================================================
-const zone0 = Math.ceil(Math.max(screen.width || 0, screen.height || 0, innerWidth, innerHeight, 256) * DPR) + 4;
-const F = creerFeuille(document.getElementById("feuille"), zone0);
+// F : la feuille qu'on dessine (préparée à l'ouverture d'un dessin, à sa taille à lui) ; son canvas est l'écran
+const F = creerFeuille(document.getElementById("feuille"), 1);
+F.S = F.H = 0; F.G = F.I = null;
 const M = creerFeuille(document.getElementById("marge"), Math.ceil(Math.max(MARGE, 256) * DPR) + 4);
 const ELT = { dessin: document.getElementById("dessin"), pile: document.getElementById("pile"),
               cartes: document.getElementById("cartes"), fond: document.getElementById("fond") };
@@ -796,11 +982,10 @@ let vue = "pile";
 
 function dimensionnerTout() {
   const w = Math.max(1, Math.round(innerWidth * DPR)), h = Math.max(1, Math.round(innerHeight * DPR));
-  if (w !== F.cw || h !== F.ch) {
-    dimensionner(F, w, h);
+  if (w !== F.cv.width || h !== F.cv.height) {
+    F.cv.width = w; F.cv.height = h;
     const mw = Math.round(MARGE * DPR);
-    F.limX = w - mw;
-    composer(F, 0, 0, w - 1, h - 1);
+    if (F.S) { ajuster(); peindre(); }
     dimensionner(M, mw, h);
     M.ox = w - mw;
     M.limX = 1e9;
@@ -921,7 +1106,7 @@ function annuler() {
   if (!e) return;
   if (e.tissu) tissu = e.tissu;
   for (const t of e.tuiles.values()) {
-    if (t.bx + t.w > F.S || t.by + t.h > F.S) continue;
+    if (t.bx + t.w > F.S || t.by + t.h > F.H) continue;
     for (let y = 0; y < t.h; y++) {
       const o = (t.by + y) * F.S + t.bx;
       F.G.set(t.g.subarray(y * t.w, y * t.w + t.w), o);
@@ -939,16 +1124,82 @@ function memoriser(e) {
 
 // ---------- dessiner ----------
 let trait = null;
-function point(cv, e) {
+// position sur l'écran (pixels du canvas), puis sur la feuille
+function ecran(cv, e) {
   const rc = cv.getBoundingClientRect();
   return [(e.clientX - rc.left) * cv.width / rc.width, (e.clientY - rc.top) * cv.height / rc.height];
+}
+function point(cv, e) {
+  const [sx, sy] = ecran(cv, e);
+  return [(sx - V.x) / V.z, (sy - V.y) / V.z];
 }
 function pression(e) {
   if (e.pointerType === "mouse") return 0.5;
   return e.pressure > 0 ? Math.min(1, e.pressure) : 0.05;
 }
+
+// ---------- deux doigts : rapprocher / écarter pour zoomer, glisser pour déplacer la feuille ----------
+const doigts = new Map();
+let geste = null, peintureDemandee = false, anim = 0;
+function repeindre() {
+  if (peintureDemandee) return;
+  peintureDemandee = true;
+  requestAnimationFrame(() => { peintureDemandee = false; peindre(); });
+}
+// la paume qui repose sur l'écran : un contact large, on l'ignore
+const paume = e => (e.width || 0) > 42 || (e.height || 0) > 42;
+function debutGeste() {
+  const [a, b] = [...doigts.values()];
+  geste = { d: Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, m: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], z: V.z, x: V.x, y: V.y };
+  cancelAnimationFrame(anim);
+}
+function suivreGeste() {
+  const [a, b] = [...doigts.values()];
+  const d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const z = Math.max(V.zFit * 0.6, geste.z * d / geste.d);
+  V.z = z;
+  V.x = m[0] - (geste.m[0] - geste.x) * z / geste.z;
+  V.y = m[1] - (geste.m[1] - geste.y) * z / geste.z;
+  borner();
+  repeindre();
+}
+// en dessous de la feuille entière, elle revient se poser en entier
+function finGeste() {
+  geste = null;
+  if (V.z >= V.zFit * 1.04) return;
+  const depart = { ...V };
+  ajuster();
+  const cible = { ...V };
+  Object.assign(V, depart);
+  const t0 = performance.now();
+  const pas = now => {
+    let f = Math.min(1, (now - t0) / 240); f = 1 - Math.pow(1 - f, 3);
+    V.z = depart.z + (cible.z - depart.z) * f; V.x = depart.x + (cible.x - depart.x) * f; V.y = depart.y + (cible.y - depart.y) * f;
+    peindre();
+    if (f < 1) anim = requestAnimationFrame(pas);
+  };
+  anim = requestAnimationFrame(pas);
+}
+F.cv.addEventListener("pointerdown", e => {
+  if (e.pointerType !== "touch" || trait || !F.S || paume(e)) return;
+  try { F.cv.setPointerCapture(e.pointerId); } catch (_) {}
+  doigts.set(e.pointerId, ecran(F.cv, e));
+  if (doigts.size === 2) debutGeste();
+});
+F.cv.addEventListener("pointermove", e => {
+  if (e.pointerType !== "touch" || !doigts.has(e.pointerId)) return;
+  doigts.set(e.pointerId, ecran(F.cv, e));
+  if (geste && doigts.size === 2) suivreGeste();
+});
+for (const n of ["pointerup", "pointercancel"]) F.cv.addEventListener(n, e => {
+  if (e.pointerType !== "touch" || !doigts.delete(e.pointerId)) return;
+  if (geste && doigts.size < 2) finGeste();
+});
+
 F.cv.addEventListener("pointerdown", e => {
   if (e.pointerType === "touch") return; // la main et les doigts ne dessinent pas
+  if (!F.S) return;
+  if (geste) { geste = null; doigts.clear(); }
   e.preventDefault();
   try { F.cv.setPointerCapture(e.pointerId); } catch (_) {}
   const [x, y] = point(F.cv, e);
@@ -986,12 +1237,12 @@ function lireInclinaison(e) {
 function effiler(s) {
   const t = OUTILS[s.cle];
   // un trait posé puis levé s'arrête rond ; seul un geste rapide (> ~100 mm/s) laisse une queue
-  const v0 = 100 / 1000 * MM;
+  const v0 = 100 / 1000 * F.mm;
   if (!t.l1 || s.v < v0) return;
   const n = Math.hypot(s.ux, s.uy);
   if (n < 0.5) return;
   const ux = s.ux / n, uy = s.uy / n;
-  const L = Math.min(3.5 * MM, (s.v - v0 * 0.6) * 18);          // ~18 ms de levée
+  const L = Math.min(3.5 * F.mm, (s.v - v0 * 0.6) * 18);        // ~18 ms de levée
   const N = Math.max(4, Math.ceil(L / 1.5));
   const x0 = s.x, y0 = s.y, p0 = s.p;
   for (let k = 1; k <= N; k++) {
@@ -1082,64 +1333,75 @@ async function sauver_() {
   clearTimeout(minuterieSauve);
   if (!courant || !modifie) return sauveEnCours;
   if (sauveEnCours) { await sauveEnCours; return sauver_(); }
+  if (!F.S) return;
   modifie = false;
   sauveEnCours = (async () => {
-    const w = F.limX, h = F.ch, S = F.S, n = w * h;
-    const buf = new ArrayBuffer(n * 3), g16 = new Uint16Array(buf, 0, n), i8 = new Uint8Array(buf, n * 2, n);
-    const q = 65535 / GMAX;
-    for (let y = 0; y < h; y++) {
-      const o = y * S, d = y * w;
-      for (let x = 0; x < w; x++) { g16[d + x] = Math.min(65535, F.G[o + x] * q + 0.5); i8[d + x] = F.I[o + x] * 255 + 0.5; }
+    const w = F.S, h = F.H, n = w * h;
+    // la copie gardée en mémoire ne se refait qu'à l'endroit où la feuille a changé
+    let B = F.sauvegarde, Z = F.aSauver;
+    if (!B) {
+      const buf = new ArrayBuffer(n * 3);
+      B = F.sauvegarde = { buf, g16: new Uint16Array(buf, 0, n), i8: new Uint8Array(buf, n * 2, n) };
+      Z = [0, 0, w - 1, h - 1];
     }
-    const apercu = await vignette(F.cv, w, h);
-    const { blob, gz } = await compresser(buf);
-    await ecrireDessin({ id: courant.id, cree: courant.cree, modifie: Date.now(), w, h, dpr: DPR, gz, donnees: blob, apercu, nom: courant.nom || "", carnet: courant.carnet || "", temps: Math.round(courant.temps || 0) });
-  })().catch(() => { modifie = true; }).finally(() => { sauveEnCours = null; });
+    F.aSauver = [Infinity, Infinity, -1, -1];
+    const q = 65535 / GMAX, { g16, i8 } = B, G = F.G, I = F.I;
+    if (Z[2] >= Z[0] && Z[3] >= Z[1]) {
+      const x0 = Math.max(0, Z[0]), x1 = Math.min(w - 1, Z[2]), y0 = Math.max(0, Z[1]), y1 = Math.min(h - 1, Z[3]);
+      for (let y = y0; y <= y1; y++) {
+        const o = y * w;
+        for (let x = x0; x <= x1; x++) { g16[o + x] = Math.min(65535, G[o + x] * q + 0.5); i8[o + x] = I[o + x] * 255 + 0.5; }
+      }
+    }
+    const fiche = { id: courant.id, cree: courant.cree, nom: courant.nom || "", carnet: courant.carnet || "", temps: Math.round(courant.temps || 0) };
+    const mm = F.mm, dpi = F.dpi;
+    const donnees = new Blob([B.buf]);
+    const apercu = await vignette();
+    const { blob, gz } = await compresser(donnees);
+    await ecrireDessin({ ...fiche, modifie: Date.now(), w, h, mm, dpi, dpr: DPR, gz, donnees: blob, apercu });
+  })().catch(() => { modifie = true; if (F.S) F.aSauver = [0, 0, F.S - 1, F.H - 1]; }).finally(() => { sauveEnCours = null; });
   return sauveEnCours;
 }
-function vignette(src, w, h) {
-  const tw = Math.min(w, 1280), th = Math.round(h * tw / w);
+// la petite image pour l'accueil, faite depuis les morceaux de la feuille
+function vignette() {
+  const s = Math.min(1, 1280 / Math.max(F.S, F.H)), tw = Math.max(1, Math.round(F.S * s)), th = Math.max(1, Math.round(F.H * s));
   const c = document.createElement("canvas");
   c.width = tw; c.height = th;
   const ctx = c.getContext("2d");
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(src, 0, 0, w, h, 0, 0, tw, th);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  for (const t of F.tuiles) {
+    const a = Math.round(t.x * s), b = Math.round(t.y * s);
+    ctx.drawImage(t.cv, a, b, Math.round((t.x + t.w) * s) - a, Math.round((t.y + t.h) * s) - b);
+  }
   return new Promise(res => c.toBlob(b => res(b), "image/jpeg", 0.9));
 }
-async function chargerDans(rec, G, I, S, dpr = DPR) {
+// la densité d'un dessin (px par mm) ; les dessins d'avant avaient celle de l'écran
+const mmDe = rec => rec.mm || 4.8 * (rec.dpr || DPR);
+// un dessin se recharge à sa taille à lui, pixel pour pixel
+async function chargerDans(rec, F) {
   const ab = await decompresser(rec.donnees, rec.gz);
   const n = rec.w * rec.h, g16 = new Uint16Array(ab, 0, n), i8 = new Uint8Array(ab, n * 2, n);
-  const q = GMAX / 65535;
-  // si l'écran n'a plus la même densité, on remet le dessin à sa taille réelle
-  const f = dpr / (rec.dpr || dpr);
-  const w = Math.min(Math.round(rec.w * f), S), h = Math.min(Math.round(rec.h * f), S);
+  const q = GMAX / 65535, w = Math.min(rec.w, F.S), h = Math.min(rec.h, F.H);
   for (let y = 0; y < h; y++) {
-    const o = y * S;
-    if (f === 1) {
-      const d = y * rec.w;
-      for (let x = 0; x < w; x++) { G[o + x] = g16[d + x] * q; I[o + x] = i8[d + x] / 255; }
-      continue;
-    }
-    const sy = Math.min(rec.h - 1, (y + 0.5) / f - 0.5), y0 = Math.max(0, Math.floor(sy)), y1 = Math.min(rec.h - 1, y0 + 1), ty = Math.max(0, sy - y0);
-    for (let x = 0; x < w; x++) {
-      const sx = Math.min(rec.w - 1, (x + 0.5) / f - 0.5), x0 = Math.max(0, Math.floor(sx)), x1 = Math.min(rec.w - 1, x0 + 1), tx = Math.max(0, sx - x0);
-      const a = y0 * rec.w + x0, b = y0 * rec.w + x1, c = y1 * rec.w + x0, d = y1 * rec.w + x1;
-      const mix = (A) => (A[a] * (1 - tx) + A[b] * tx) * (1 - ty) + (A[c] * (1 - tx) + A[d] * tx) * ty;
-      G[o + x] = mix(g16) * q; I[o + x] = mix(i8) / 255;
-    }
+    const o = y * F.S, d = y * rec.w;
+    for (let x = 0; x < w; x++) { F.G[o + x] = g16[d + x] * q; F.I[o + x] = i8[d + x] / 255; }
   }
 }
-// pour la galerie : le dessin en grand, tel qu'il est sur la feuille
+// pour la galerie : le dessin en grand, tel qu'il est sur la feuille (fait par bandes, pour ne pas tout tenir en mémoire)
 async function imageComplete(rec) {
-  const w = rec.w, h = rec.h, S = Math.max(w, h);
-  const T = { S, G: new Float32Array(S * S), I: new Float32Array(S * S), cw: w, ch: h, ox: 0, ctx: null };
-  await chargerDans(rec, T.G, T.I, S, rec.dpr || DPR);
+  const ab = await decompresser(rec.donnees, rec.gz);
+  const w = rec.w, h = rec.h, n = w * h, g16 = new Uint16Array(ab, 0, n), i8 = new Uint8Array(ab, n * 2, n), q = GMAX / 65535;
+  const g = grainPour(mmDe(rec)), B = 256;
+  const src = { G: new Float32Array(w * B), I: new Float32Array(w * B), S: w, ox: 0, gT: g.T, gR: g.R };
   const c = document.createElement("canvas");
   c.width = w; c.height = h;
-  T.ctx = c.getContext("2d");
-  T.img = T.ctx.createImageData(w, h);
-  T.d32 = new Uint32Array(T.img.data.buffer);
-  composer(T, 0, 0, w - 1, h - 1);
+  const ctx = c.getContext("2d"), img = ctx.createImageData(w, B), d32 = new Uint32Array(img.data.buffer);
+  for (let y0 = 0; y0 < h; y0 += B) {
+    const hb = Math.min(B, h - y0), o = y0 * w;
+    for (let k = 0; k < hb * w; k++) { src.G[k] = g16[o + k] * q; src.I[k] = i8[o + k] / 255; }
+    couleurs(src, 0, y0, w - 1, y0 + hb - 1, d32, w, 0, y0, y0);
+    ctx.putImageData(img, 0, y0, 0, 0, w, hb);
+  }
   return new Promise(res => c.toBlob(b => res(b), "image/png"));
 }
 async function versGalerie(rec) {
@@ -1442,10 +1704,11 @@ function disposerPile(entree = false) {
 
   // ---- les dessins ----
   const grille = el("div", "grille");
-  const ratioEcran = (F.limX || innerWidth * DPR - MARGE * DPR) / (F.ch || innerHeight * DPR);
-  const vw = Math.round(320 * DPR), vh = Math.round(320 * DPR / ratioEcran), cle = vw + "x" + vh;
+  // la feuille neuve a la forme du dernier format choisi
+  const tn = tailleNouvelle(reglages.nouvelle), ratioNeuve = tn.W / tn.H;
+  const vw = Math.round(320 * DPR), vh = Math.round(320 * DPR / ratioNeuve), cle = vw + "x" + vh;
   if (viergeFaite !== cle) { papierVierge = fabriquerVierge(vw, vh); viergeFaite = cle; }
-  const fiches = [{ id: "nouvelle", w: ratioEcran, h: 1 }, ...visibles];
+  const fiches = [{ id: "nouvelle", w: ratioNeuve, h: 1 }, ...visibles];
   fiches.forEach((f, i) => {
     const tuile = el("div", "tuile");
     const carte = el("div", "carte");
@@ -1628,7 +1891,7 @@ function fermerFonds() {
     const o = t.closest(".onglet");
     if (o && o.classList.contains("ajout")) return nouveauCarnet();
     if (o && o.dataset.carnet) { reglages.carnet = o.dataset.carnet; garderReglages(); return disposerPile(); }
-    if (d.carte) ouvrir(d.carte);
+    if (d.carte) d.carte.dataset.id === "nouvelle" ? ouvrirChoix(d.carte) : ouvrir(d.carte);
   });
   // Android interrompt un appui long (pointercancel) pour son propre menu : l'appui long reste un appui long
   ELT.cartes.addEventListener("pointercancel", () => {
@@ -1781,29 +2044,47 @@ let dernierJour = "";
 
 // ---------- passer de la pile à la feuille, et retour ----------
 let enMouvement = false;
-// la feuille elle-même vole entre la grille et l'écran, à sa vraie résolution (pas une vignette agrandie)
-function poseFeuille(r) {
-  const Wd = F.limX / DPR, Hd = F.ch / DPR;
-  return `translate(${r.x}px,${r.y}px) rotate(${r.a || 0}deg) scale(${r.w / Wd},${r.h / Hd})`;
+// la feuille, là où elle est posée quand on la voit en entier (px CSS)
+function rectPosee() {
+  const avant = { ...V };
+  ajuster();
+  const r = { x: V.x / DPR, y: V.y / DPR, w: F.S * V.z / DPR, h: F.H * V.z / DPR, a: 0 };
+  Object.assign(V, avant);
+  return r;
 }
-function voler(depuis, vers, fini) {
-  const cv = F.cv, D = ELT.dessin;
-  D.classList.add("vol");
-  cv.style.transition = "none";
-  cv.style.transform = depuis ? poseFeuille(depuis) : "none";
-  cv.getBoundingClientRect();
+// la feuille elle-même vole entre la grille et l'écran : une image faite de ses morceaux, à la taille où on la voit
+function voler(depuis, vers, entree, fini) {
+  const R = rectPosee(), D = ELT.dessin;
+  const c = document.createElement("canvas");
+  c.id = "envol";
+  c.width = Math.max(1, Math.round(R.w * DPR)); c.height = Math.max(1, Math.round(R.h * DPR));
+  c.style.width = R.w + "px"; c.style.height = R.h + "px";
+  const ctx = c.getContext("2d", { alpha: false }), s = c.width / F.S;
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  for (const t of F.tuiles) {
+    const a = Math.round(t.x * s), b = Math.round(t.y * s);
+    ctx.drawImage(t.cv, a, b, Math.round((t.x + t.w) * s) - a, Math.round((t.y + t.h) * s) - b);
+  }
+  const pose = r => r ? `translate(${r.x}px,${r.y}px) rotate(${r.a || 0}deg) scale(${r.w / R.w},${r.h / R.h})` : `translate(${R.x}px,${R.y}px)`;
+  c.style.transition = "none";
+  c.style.transform = pose(depuis);
+  document.body.appendChild(c);
+  c.getBoundingClientRect();
   requestAnimationFrame(() => requestAnimationFrame(() => {
-    cv.style.transition = "";
-    cv.style.transform = vers ? poseFeuille(vers) : "none";
+    c.style.transition = "";
+    c.style.transform = pose(vers);
+    // la table de dessin apparaît (ou s'en va) pendant que la feuille vole
+    D.classList.toggle("vol", !entree);
   }));
   let fait = false;
   const fin = () => {
     if (fait) return; fait = true;
-    cv.removeEventListener("transitionend", fin);
+    c.removeEventListener("transitionend", fin);
     fini();
+    c.remove();
   };
-  cv.addEventListener("transitionend", fin);
-  setTimeout(fin, 600);
+  c.addEventListener("transitionend", fin);
+  setTimeout(fin, 650);
 }
 function rectCarte(el) {
   const a = +el.dataset.angle || 0, w = el.offsetWidth, h = el.offsetHeight;
@@ -1812,32 +2093,45 @@ function rectCarte(el) {
   const cx = rc.left + rc.width / 2, cy = rc.top + rc.height / 2, t = a * Math.PI / 180;
   return { x: cx - (w / 2) * Math.cos(t) + (h / 2) * Math.sin(t), y: cy - (w / 2) * Math.sin(t) - (h / 2) * Math.cos(t), w, h, a };
 }
-async function ouvrir(el) {
+async function ouvrir(el, taille) {
   if (enMouvement) return;
   enMouvement = true;
   const id = el.dataset.id;
   const depuis = rectCarte(el);
-  F.G.fill(0); F.I.fill(0);
   histo.length = 0;
-  tissu = new Float32Array(TS * TS);
   modifie = false;
   let rec = null;
-  if (id === "nouvelle") courant = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), cree: Date.now(), nom: "", carnet: reglages.carnet !== "tout" ? reglages.carnet : "", temps: 0 };
-  else {
+  if (id === "nouvelle") {
+    courant = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), cree: Date.now(), nom: "", carnet: reglages.carnet !== "tout" ? reglages.carnet : "", temps: 0 };
+    taille = taille || tailleNouvelle(reglages.nouvelle);
+    preparerFeuille(taille.W, taille.H, taille.mm);
+    F.dpi = taille.dpi;
+  } else {
     rec = await lireDessin(id);
     courant = { id, cree: rec ? rec.cree : Date.now(), nom: rec && rec.nom || "", carnet: rec && rec.carnet || "", temps: rec && rec.temps || 0 };
-    if (rec) { try { await chargerDans(rec, F.G, F.I, F.S); } catch (_) {} }
+    if (rec) {
+      preparerFeuille(rec.w, rec.h, mmDe(rec));
+      F.dpi = rec.dpi || Math.round(mmDe(rec) * 25.4);
+      try { await chargerDans(rec, F); } catch (_) {}
+    } else {
+      const t = tailleNouvelle({ ...reglages.nouvelle, fmt: "ecran" });
+      preparerFeuille(t.W, t.H, t.mm); F.dpi = t.dpi;
+    }
   }
+  tissu = new Float32Array(F.TS * F.TS);
+  ELT.dessin.classList.add("dessus", "vol");
   ELT.dessin.classList.remove("cache");
   dimensionnerTout();
-  composer(F, 0, 0, F.cw - 1, F.ch - 1);
+  ajuster();
+  composer(F, 0, 0, F.S - 1, F.H - 1);
+  peindre();
   dessinerMarge();
   el.style.visibility = "hidden";
-  voler(depuis, null, () => {
+  voler(depuis, null, true, () => {
     vue = "feuille";
     AMB.arreter();
     ELT.pile.classList.add("cache");
-    ELT.dessin.classList.remove("vol");
+    ELT.dessin.classList.remove("dessus");
     el.style.visibility = "";
     enMouvement = false;
   });
@@ -1846,7 +2140,7 @@ async function allerPile() {
   if (enMouvement) return;
   enMouvement = true;
   if (modifie) await sauver_(); else if (sauveEnCours) await sauveEnCours;
-  ELT.dessin.classList.add("vol");          // la feuille reste au-dessus pendant que l'accueil revient dessous
+  ELT.dessin.classList.add("dessus");      // la table reste au-dessus pendant que l'accueil revient dessous
   vue = "pile";
   ELT.pile.classList.remove("cache");
   appliquerAmbiance();
@@ -1854,13 +2148,86 @@ async function allerPile() {
   const el = courant && ELT.contenu.querySelector(`[data-id="${courant.id}"]`);
   if (el) el.style.visibility = "hidden";
   const vers = el ? rectCarte(el) : { x: innerWidth / 2, y: innerHeight / 2, w: 1, h: 1, a: 0 };
-  voler(null, vers, () => {
+  voler(null, vers, false, () => {
     if (el) el.style.visibility = "";
     ELT.dessin.classList.add("cache");
-    ELT.dessin.classList.remove("vol");
-    F.cv.style.transition = "none"; F.cv.style.transform = "none";
+    ELT.dessin.classList.remove("vol", "dessus");
+    lacherFeuille();                       // la mémoire de la feuille est rendue
     enMouvement = false;
   });
+}
+
+// ---------- une feuille neuve : son format et sa résolution, choisis comme sur une vraie ----------
+const FORMATS = { A5: [148, 210], A4: [210, 297], A3: [297, 420] };
+const DPIS = [300, 350, 600];
+const PX_MAX = 40e6;                       // au-delà, la tablette n'a plus la mémoire pour la tenir
+function tailleNouvelle(n) {
+  const dpi = n.dpi, mm = dpi / 25.4;
+  if (n.fmt === "libre") return { W: n.lw, H: n.lh, mm, dpi };
+  let wmm, hmm;
+  if (n.fmt === "ecran") { wmm = (innerWidth - MARGE) / 4.8; hmm = innerHeight / 4.8; }
+  else {
+    const [a, b] = FORMATS[n.fmt] || FORMATS.A4;
+    [wmm, hmm] = n.sens === "debout" ? [a, b] : [b, a];
+  }
+  return { W: Math.round(wmm * mm), H: Math.round(hmm * mm), mm, dpi };
+}
+if (!reglages.nouvelle) reglages.nouvelle = { fmt: "A4", sens: "couchee", dpi: 350, lw: 3000, lh: 2000 };
+function ouvrirChoix(carte) {
+  fermerMenu();
+  carte.classList.remove("presse");
+  carte.classList.add("levee");
+  const N = reglages.nouvelle;
+  const m = el("div", "menu choix-feuille"), b = el("div", "bout");
+  b.style.backgroundImage = `url(${papierVierge})`;
+  b.style.clipPath = dechire(hacher("nouvelle" + Date.now()));
+  m.append(b);
+  menuOuvert = { el: m, carte, id: "nouvelle" };
+  const placer = () => {
+    const r = carte.getBoundingClientRect(), mw = m.offsetWidth, mh = m.offsetHeight;
+    let x = r.right - mw * 0.25, y = r.top + r.height * 0.15;
+    if (x + mw > innerWidth - 20) x = r.left - mw * 0.75;
+    m.style.left = Math.max(20, Math.min(innerWidth - mw - 20, x)) + "px";
+    m.style.top = Math.max(20, Math.min(innerHeight - mh - 20, y)) + "px";
+  };
+  const opt = (texte, pris, faire, non = false) => {
+    const o = el("button", "opt" + (pris ? " pris" : "") + (non ? " non" : ""), texte);
+    if (pris) requestAnimationFrame(() => o.appendChild(souligne(o.offsetWidth - 4, hacher(texte) * 1e5 | 0)));
+    if (!non) o.addEventListener("click", e => { e.stopPropagation(); faire(); garderReglages(); dessiner(); });
+    return o;
+  };
+  const rang = (...enfants) => { const r = el("div", "rang"); r.append(...enfants); return r; };
+  const dessiner = () => {
+    b.textContent = "";
+    b.append(rang(...["A5", "A4", "A3"].map(f => opt(f, N.fmt === f, () => { N.fmt = f; })),
+                  opt("écran", N.fmt === "ecran", () => { N.fmt = "ecran"; }), opt("libre", N.fmt === "libre", () => { N.fmt = "libre"; })));
+    if (N.fmt !== "ecran" && N.fmt !== "libre")
+      b.append(rang(opt("couchée", N.sens !== "debout", () => { N.sens = "couchee"; }), opt("debout", N.sens === "debout", () => { N.sens = "debout"; })));
+    if (N.fmt === "libre") {
+      const champ = (cle) => {
+        const c = el("input", "saisie px"); c.type = "number"; c.inputMode = "numeric"; c.min = 64; c.max = 12000; c.value = N[cle];
+        c.addEventListener("change", () => { N[cle] = Math.max(64, Math.min(12000, Math.round(+c.value || N[cle]))); garderReglages(); dessiner(); });
+        return c;
+      };
+      b.append(rang(champ("lw"), el("span", "fois", "×"), champ("lh"), el("span", "unite", "px")));
+    }
+    b.append(rang(...DPIS.map(d => {
+      const t = tailleNouvelle({ ...N, dpi: d });
+      return opt(String(d), N.dpi === d, () => { N.dpi = d; }, t.W * t.H > PX_MAX);
+    }), el("span", "unite", "dpi")));
+    const t = tailleNouvelle(N), trop = t.W * t.H > PX_MAX;
+    b.append(el("div", "taille", trop ? "trop grand pour la tablette" : `${t.W} × ${t.H} px   ·   ${Math.round(t.W / t.mm)} × ${Math.round(t.H / t.mm)} mm`));
+    const go = el("button", "choix commencer", "Commencer");
+    if (trop) go.disabled = true;
+    go.addEventListener("click", e => { e.stopPropagation(); if (trop) return; fermerMenu(); ouvrir(carte, t); });
+    b.append(go);
+    placer();
+  };
+  m.addEventListener("pointerdown", e => e.stopPropagation());
+  m.addEventListener("pointerup", e => e.stopPropagation());
+  document.body.appendChild(m);
+  dessiner();
+  requestAnimationFrame(() => requestAnimationFrame(() => m.classList.add("ouvert")));
 }
 
 // le temps passé à dessiner : compté tant que le crayon bouge (une pause de plus de 4 s ne compte pas)
@@ -1880,7 +2247,13 @@ if (window.ResizeObserver) new ResizeObserver(dimensionnerTout).observe(document
 dimensionnerTout();
 appliquerAmbiance();
 remplirPile(true);
-window.__feuille = { choisir, dessinerMarge, F, M };
+window.__feuille = {
+  choisir, dessinerMarge, F, M, V, preparerFeuille, ajuster, tailleNouvelle, peindre,
+  banc() { SANS_ECRAN = true; },
+  preparer(W, H, mm) { preparerFeuille(W, H, mm); tissu = new Float32Array(F.TS * F.TS); },
+  // toute la feuille en couleurs (pour le banc d'essai)
+  pixels() { const d = new Uint32Array(F.S * F.H); couleurs(F, 0, 0, F.S - 1, F.H - 1, d, F.S, 0, 0); return { w: F.S, h: F.H, d }; },
+};
 })();
 </script>
 
